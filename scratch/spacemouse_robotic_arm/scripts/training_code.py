@@ -52,9 +52,9 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
         try:
             with open(output_file, "rb") as f:
                 dataset = pickle.load(f)
-            print(f"📂 Loaded existing dataset with {len(dataset)} episodes from '{output_file}'.")
+            print(f"Loaded existing dataset with {len(dataset)} episodes from '{output_file}'.")
         except Exception as e:
-            print(f"⚠️ Could not load existing file ({e}). Starting a new dataset.")
+            print(f"Could not load existing file ({e}). Starting a new dataset.")
             dataset = []
     else:
         dataset = []
@@ -63,7 +63,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
     try:
         devices = pyspacemouse.get_all_hid_devices()
         if not devices:
-            print("❌ Error: No SpaceMouse detected. Ensure it's plugged in and the official 3Dconnexion driver is completely closed!")
+            print("Error: No SpaceMouse detected. Ensure it's plugged in and the official 3Dconnexion driver is completely closed!")
             return
         print(f"Found SpaceMouse device: {devices[0]}")
     except Exception as e:
@@ -137,31 +137,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                     raw_delta = np.array([fx * scale, fy * scale, fz * scale], dtype=np.float32)
                     smoothed_action = alpha * raw_delta + (1.0 - alpha) * smoothed_action
                     dx, dy, dz = smoothed_action[0], smoothed_action[1], smoothed_action[2]
-                r_roll = getattr(state, 'roll', getattr(state, 'rx', 0.0))
-                r_pitch = getattr(state, 'pitch', getattr(state, 'ry', 0.0))
-                r_yaw = getattr(state, 'yaw', getattr(state, 'rz', 0.0))
-
-                f_roll = applydeadzone(r_roll, threshold=deadzone)
-                f_pitch = applydeadzone(r_pitch, threshold=deadzone)
-                f_yaw = applydeadzone(r_yaw, threshold=deadzone)
-
-                if f_roll == 0.0 and f_pitch == 0.0 and f_yaw == 0.0:
-                    smoothed_rot = np.zeros(3, dtype=np.float32)
-                    droll, dpitch, dyaw = 0.0, 0.0, 0.0
-                else:
-                    raw_rot = np.array([
-                        apply_cubic_scaling(f_roll) * rot_scale,
-                        apply_cubic_scaling(f_pitch) * rot_scale,
-                        apply_cubic_scaling(f_yaw) * rot_scale
-                    ], dtype=np.float32)
-                    smoothed_rot = alpha * raw_rot + (1.0 - alpha) * smoothed_rot
-                    droll, dpitch, dyaw = smoothed_rot[0], smoothed_rot[1], smoothed_rot[2]
-                if env.action_space.shape[0] == 7:
-                    # 7D Action: [dx, dy, dz, droll, dpitch, dyaw, gripper]
-                    action = np.array([dx, dy, dz, droll, dpitch, dyaw, gripper_val], dtype=np.float32)
-                else:
-                    # Fallback for 4D Action space: [dx, dy, dz, gripper]
-                    action = np.array([dx, dy, dz, gripper_val], dtype=np.float32)
+                action = np.array([dx, dy, dz, gripper_val], dtype=np.float32)
 
                 action = np.clip(action, env.action_space.low, env.action_space.high)
                

@@ -7,14 +7,14 @@ import time
 from imitation.data import types
 from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
-from spacemouse_robotic_arm.scripts.training_code import FlattenGoalEnv # Import data from demos
+from training_code import FlattenGoalEnv # Import data from demos
 
 def evaluate_and_view_policy(policy, num_episodes=3):
     """Opens the MuJoCo viewer and watches the trained BC agent perform the task live."""
     print("\n--- Launching 3D Simulation Evaluation ---")
     
     # 1. Create evaluation environment with human rendering enabled
-    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps = 200)
+    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps = 350)
     eval_env = FlattenGoalEnv(eval_raw)
     
     for ep in range(num_episodes):
