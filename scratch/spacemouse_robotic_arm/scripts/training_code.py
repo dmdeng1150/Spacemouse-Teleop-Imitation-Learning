@@ -90,6 +90,10 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
         for ep in range(total_episodes):
             obs, info = env.reset()
             done = False
+            aborted = False
+            terminated = False
+            truncated = False
+
             
             ep_obs = [obs]
             ep_acts = []
@@ -114,6 +118,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                 left, right = state.buttons
                 if left and right:
                     print(f"Episode {ep + 1} flagged complete by operator.")
+                    aborted = True
                     break
                 elif left:
                     gripper_val = -1.0
@@ -148,14 +153,19 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                 ep_acts.append(action)
                 
                 
-            if len(ep_acts) > 1:
+            if aborted:
+                print(f"Trial {current_ep_num} DISCARDED (Cancelled by operator).")
+            elif truncated:
+                print(f"Trial {current_ep_num} DISCARDED (Reached max episode steps).")
+            elif terminated:
                 dataset.append({
-                    "obs": np.array(ep_obs, dtype=np.float32),
-                    "acts": np.array(ep_acts, dtype=np.float32),
-                    "terminal": True
+                "obs": np.array(ep_obs, dtype=np.float32),
+                "acts": np.array(ep_acts, dtype=np.float32),
+                "terminal": True
                 })
-                print(f"Saved Episode {current_ep_num} with {len(ep_acts)} steps.")
-                
+                print(f"Saved Episode {current_ep_num} with {len(ep_acts)} steps!")
+            else:
+                print(f"Trial {current_ep_num} DISCARDED (Ended without success).")
     env.close()
     
     with open(output_file, "wb") as f:
