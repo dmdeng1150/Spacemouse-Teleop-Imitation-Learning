@@ -5,6 +5,7 @@ import panda_mujoco_gym
 import time
 
 from imitation.data import types
+from imitation.algorithms import bc  
 from imitation.algorithms.adversarial.airl import AIRL
 from imitation.rewards.reward_nets import BasicShapedRewardNet
 from imitation.util.networks import RunningNorm
@@ -86,7 +87,15 @@ def train_on_operator_data(data_path="operator_data.pkl"):
         n_epochs=10,
         seed=42
     )
-
+    bc_trainer = bc.BC(
+        observation_space=venv.observation_space,
+        action_space=venv.action_space,
+        policy=learner.policy,  # <-- In-place updates learner.policy directly!
+        demonstrations=formatted_dataset,
+        rng=np.random.default_rng(42),
+    )
+    # Train BC offline for 30 epochs (takes ~5-10 seconds on CPU/GPU)
+    bc_trainer.train(n_epochs=30)
     # 4. Define the AIRL Reward Network / Discriminator Architecture
     reward_net = BasicShapedRewardNet(
         observation_space=venv.observation_space,
@@ -108,7 +117,7 @@ def train_on_operator_data(data_path="operator_data.pkl"):
     
     # 6. Train policy network online via AIRL
     print("Starting AIRL training on your SpaceMouse runs...")
-    airl_trainer.train(total_timesteps=100_000)
+    airl_trainer.train(total_timesteps=25_000)
     
     # 7. Save the trained generator model
     airl_trainer.gen_algo.save("airl_panda_spacemouse_model")
