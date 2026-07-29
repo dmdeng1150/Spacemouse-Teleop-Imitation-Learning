@@ -14,14 +14,14 @@ from stable_baselines3 import PPO
 from stable_baselines3.ppo import MlpPolicy
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from spacemouse_robotic_arm.scripts.training_code import FlattenGoalEnv # Import wrapper from demos
+from training_code import FlattenGoalEnv # Import wrapper from demos
 
 def evaluate_and_view_policy(policy, num_episodes=3):
     """Opens the MuJoCo viewer and watches the trained AIRL agent perform the task live."""
     print("\n--- Launching 3D Simulation Evaluation ---")
     
     # 1. Create evaluation environment with human rendering enabled
-    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=200)
+    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=350)
     eval_env = FlattenGoalEnv(eval_raw)
     
     for ep in range(num_episodes):
@@ -103,6 +103,7 @@ def train_on_operator_data(data_path="operator_data.pkl"):
         venv=venv,
         gen_algo=learner,
         reward_net=reward_net,
+        allow_variable_horizon=True
     )
     
     # 6. Train policy network online via AIRL
