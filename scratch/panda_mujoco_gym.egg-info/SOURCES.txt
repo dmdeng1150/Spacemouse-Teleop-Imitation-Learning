@@ -1,6 +1,0 @@
-pyproject.toml
-setup.py
-panda_mujoco_gym.egg-info/PKG-INFO
-panda_mujoco_gym.egg-info/SOURCES.txt
-panda_mujoco_gym.egg-info/dependency_links.txt
-panda_mujoco_gym.egg-info/top_level.txt
