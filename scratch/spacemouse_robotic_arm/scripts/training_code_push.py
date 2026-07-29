@@ -81,7 +81,6 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
 
     print(f"\n=== SpaceMouse Teleoperation Mode ===")
     print("Instructions:\n- Move Joystick: Move Franka End-Effector (X, Y, Z)")
-    print("- Left Button (1): CLOSE Gripper | Right Button (2): OPEN Gripper")
     print("- Press BOTH Buttons simultaneously (3): Save Episode and Move Next\n")
 
     # Use the context manager to natively handle connection lifecycles without silent failures
@@ -97,9 +96,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
             
             ep_obs = [obs]
             ep_acts = []
-            gripper_val = 1.0  # Initial open state
-            GRIPPER_MIN = -1.0
-            GRIPPER_MAX = 1.0
+            gripper_val = 0.0  # Initial open state
             smoothed_action = np.zeros(3)
             smoothed_rot = np.zeros(3, dtype=np.float32)
             alpha = 0.6
@@ -120,11 +117,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     print(f"Episode {ep + 1} flagged complete by operator.")
                     aborted = True
                     break
-                elif left:
-                    gripper_val = -1.0
-                elif right:
-                    gripper_val = 1.0
-                gripper_val = float(np.clip(gripper_val, GRIPPER_MIN, GRIPPER_MAX))
+               
                 # Assign translation telemetry
                 scale = 0.20
                 rot_scale = 0.20
@@ -142,7 +135,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     raw_delta = np.array([fx * scale, fy * scale, fz * scale], dtype=np.float32)
                     smoothed_action = alpha * raw_delta + (1.0 - alpha) * smoothed_action
                     dx, dy, dz = smoothed_action[0], smoothed_action[1], smoothed_action[2]
-                action = np.array([dx, dy, dz, gripper_val], dtype=np.float32)
+                action = np.array([dx, dy, dz], dtype=np.float32)
 
                 action = np.clip(action, env.action_space.low, env.action_space.high)
                
