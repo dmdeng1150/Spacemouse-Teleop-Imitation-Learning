@@ -7,7 +7,7 @@ import time
 from imitation.data import types
 from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
-from spacemouse_robotic_arm.scripts.training_code import FlattenGoalEnv # Import data from demos
+from training_code import FlattenGoalEnv # Import data from demos
 
 def evaluate_and_view_policy(policy, num_episodes=3):
     """Opens the MuJoCo viewer and watches the trained BC agent perform the task live."""

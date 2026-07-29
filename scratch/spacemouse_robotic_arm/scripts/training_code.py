@@ -100,6 +100,10 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
             obs, info = env.reset()
             current_action_xyz = np.zeros(3, dtype=np.float32)
             done = False
+            aborted = False
+            terminated = False
+            truncated = False
+
             
             ep_obs = [obs]
             ep_acts = []
@@ -122,7 +126,8 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                 # Gripper control buttons
                 left, right = state.buttons
                 if left and right:
-                    print(f"Episode completed by operator at step {step_count}.")
+                    print(f"Episode {ep + 1} flagged complete by operator.")
+                    aborted = True
                     break
                 elif left:
                     gripper_val = -1.0
@@ -181,15 +186,20 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                     time.sleep(sleep)
                 else:
                     next_tick = time.perf_counter()
-
-            if len(ep_acts) > 0:
+                
+            if aborted:
+                print(f"Trial {current_ep_num} DISCARDED (Cancelled by operator).")
+            elif truncated:
+                print(f"Trial {current_ep_num} DISCARDED (Reached max episode steps).")
+            elif terminated:
                 dataset.append({
-                    "obs": np.array(ep_obs, dtype=np.float32),
-                    "acts": np.array(ep_acts, dtype=np.float32),
-                    "steps": step_count,
-                    "terminal": True
+                "obs": np.array(ep_obs, dtype=np.float32),
+                "acts": np.array(ep_acts, dtype=np.float32),
+                "terminal": True
                 })
-                print(f"Saved Episode {current_ep_num}: {step_count} steps.")
+                print(f"Saved Episode {current_ep_num} with {len(ep_acts)} steps!")
+            else:
+                print(f"Trial {current_ep_num} DISCARDED (Ended without success).")
     env.close()
     
     with open(output_file, "wb") as f:
