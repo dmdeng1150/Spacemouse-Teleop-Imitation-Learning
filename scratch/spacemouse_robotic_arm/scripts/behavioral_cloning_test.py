@@ -14,7 +14,7 @@ def evaluate_and_view_policy(policy, num_episodes=3):
     print("\n--- Launching 3D Simulation Evaluation ---")
     
     # 1. Create evaluation environment with human rendering enabled
-    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps = 350)
+    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps = 1000)
     eval_env = FlattenGoalEnv(eval_raw)
     
     for ep in range(num_episodes):
