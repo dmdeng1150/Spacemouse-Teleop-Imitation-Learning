@@ -7,15 +7,15 @@ import sys
 import pyspacemouse  # Core SpaceMouse driver wrapper
 import panda_mujoco_gym 
 import threading
-import time
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper3D
 
 class SpaceMouseThread:
-    """Dedicated background thread to drain the SpaceMouse USB HID queue in real time."""
+    """thread running in background for spacemouse input readings"""
     def __init__(self, device):
         self.device = device
         self.latest_state = None
         self.running = True
-        # Daemon thread automatically terminates when the main script exits
+        # background (daemon) thread automatically terminates when main script exits
         self.thread = threading.Thread(target=self._poll_loop, daemon=True)
         self.thread.start()
 
@@ -27,7 +27,6 @@ class SpaceMouseThread:
                     self.latest_state = state
             except Exception:
                 pass
-            # Poll aggressively at ~1000 Hz to clear the C-buffer instantly
             time.sleep(0.001)
 
     def get_state(self):
@@ -36,134 +35,136 @@ class SpaceMouseThread:
     def stop(self):
         self.running = False
 
-class FlattenGoalEnv(gym.ObservationWrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        spaces = env.observation_space.spaces
-        low = np.concatenate([spaces['observation'].low, spaces['achieved_goal'].low, spaces['desired_goal'].low])
-        high = np.concatenate([spaces['observation'].high, spaces['achieved_goal'].high, spaces['desired_goal'].high])
-        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+def make_teleop_env():
+    raw_env = gym.make("FrankaPushSparse-v0", render_mode="human", max_episode_steps=1000)
+    flat_env = FlattenGoalEnv(raw_env)
+    return SmoothFrankaWrapper3D(flat_env)
 
-    def observation(self, obs):
-        return np.concatenate([obs['observation'], obs['achieved_goal'], obs['desired_goal']])
+def smooth_deadzone(x, deadzone=0.08):
+    if abs(x) < deadzone:
+        return 0.0
+    return np.sign(x) * (abs(x) - deadzone) / (1.0 - deadzone)
 
 def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_file="operator_data_push.pkl"):
+    CONTROL_HZ = 100
+    CONTROL_DT = 1.0 / CONTROL_HZ
+
     if os.path.exists(output_file):
         try:
             with open(output_file, "rb") as f:
                 dataset = pickle.load(f)
-            print(f"Loaded existing dataset with {len(dataset)} episodes from '{output_file}'.")
-        except Exception as e:
-            print(f"Could not load existing file ({e}). Starting a new dataset.")
+            print(f"Loaded {len(dataset)} existing episodes.")
+        except Exception:
             dataset = []
     else:
         dataset = []
+
     initial_count = len(dataset)
-    # First, test if any SpaceMouse is visible to Python
+
+    raw_env = gym.make(env_id, render_mode="human", max_episode_steps=1000)
+    flat_env = FlattenGoalEnv(raw_env)
+    env = SmoothFrankaWrapper3D(flat_env, dt=CONTROL_DT)
+
+    # --- DYNAMICALLY DETECT ACTION DIMENSION (3 for Push, 4 for Pick/Place) ---
+    act_dim = env.action_space.shape[0]
+    print(f"Detected Environment Action Dimension: {act_dim}D")
+
+    GLITCH_FILTER_ALPHA = 0.55
+
+    # Wrapped in try/finally to ensure env.close() runs if stopped early
     try:
-        devices = pyspacemouse.get_all_hid_devices()
-        if not devices:
-            print("Error: No SpaceMouse detected. Ensure it's plugged in and the official 3Dconnexion driver is completely closed!")
-            return
-        print(f"Found SpaceMouse device: {devices[0]}")
-    except Exception as e:
-        print(f"HID check crashed: {e}")
-
-    raw_env = gym.make(env_id, render_mode="human", max_episode_steps=350)
-    env = FlattenGoalEnv(raw_env)
-    dataset = []
-
-    def applydeadzone(value, threshold=0.30):
-        return value if abs(value) > threshold else 0.0
-    def apply_cubic_scaling(value):
-        return value ** 3
-    
-
-    print(f"\n=== SpaceMouse Teleoperation Mode ===")
-    print("Instructions:\n- Move Joystick: Move Franka End-Effector (X, Y, Z)")
-    print("- Press BOTH Buttons simultaneously (3): Save Episode and Move Next\n")
-
-    # Use the context manager to natively handle connection lifecycles without silent failures
-    with pyspacemouse.open() as device:
-        sm_thread = SpaceMouseThread(device) 
-        for ep in range(total_episodes):
-            obs, info = env.reset()
-            done = False
-            aborted = False
-            terminated = False
-            truncated = False
-
+        with pyspacemouse.open() as device:
+            sm_thread = SpaceMouseThread(device)
             
-            ep_obs = [obs]
-            ep_acts = []
-            gripper_val = 0.0  # Initial open state
-            smoothed_action = np.zeros(3)
-            smoothed_rot = np.zeros(3, dtype=np.float32)
-            alpha = 0.6
-            
-            current_ep_num = initial_count + ep + 1
-            print(f"\n--- Recording Episode {current_ep_num} (Session {ep + 1}/{total_episodes}) ---")
-            
-            while not done:
-                # Continuous polling loop
-                state = sm_thread.get_state()
-                if state is None:
-                    time.sleep(0.01)
-                    continue
+            for ep in range(total_episodes):
+                obs, info = env.reset()
+                done = False
+                aborted = False
+                terminated = False
+                truncated = False
+
+                ep_obs = [obs]
+                ep_acts = []
+                gripper_val = 1.0
                 
-                # Check button bitmask logic safely
-                left, right = state.buttons
-                if left and right:
-                    print(f"Episode {ep + 1} flagged complete by operator.")
-                    aborted = True
-                    break
-               
-                # Assign translation telemetry
-                scale = 0.20
-                rot_scale = 0.20
-                deadzone = 0.20
-                fx = applydeadzone(state.x, threshold=deadzone)
-                fy = applydeadzone(state.y, threshold=deadzone)
-                fz = applydeadzone(state.z, threshold=deadzone)
-                if fx == 0.0 and fy == 0.0 and fz == 0.0:
-                    smoothed_action = np.zeros(3, dtype=np.float32)
-                    dx, dy, dz = 0.0, 0.0, 0.0
+                current_ep_num = initial_count + ep + 1
+                print(f"\n--- Recording Episode {current_ep_num} ---")
+
+                filtered_raw = {"x": 0.0, "y": 0.0, "z": 0.0}
+                next_tick = time.perf_counter()
+
+                while not done:
+                    state = sm_thread.get_state()
+                    if state is None:
+                        time.sleep(0.002)
+                        continue
+
+                    # Buttons: Use both buttons to abort
+                    left, right = state.buttons
+                    if left and right:
+                        print(f"Episode {current_ep_num} flagged complete by operator.")
+                        aborted = True
+                        break
+
+                    # Low-pass filter raw SpaceMouse values
+                    filtered_raw["x"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["x"] + GLITCH_FILTER_ALPHA * state.x
+                    filtered_raw["y"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["y"] + GLITCH_FILTER_ALPHA * state.y
+                    filtered_raw["z"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["z"] + GLITCH_FILTER_ALPHA * state.z
+
+                    # Calculate smoothed translations
+                    dx = smooth_deadzone(filtered_raw["x"], deadzone=0.12)
+                    dy = smooth_deadzone(filtered_raw["y"], deadzone=0.12)
+                    dz = smooth_deadzone(filtered_raw["z"], deadzone=0.12)
+
+                    # --- CREATE 3D OR 4D ACTION VECTOR BASED ON ENVIRONMENT ---
+                    if act_dim == 3:
+                        raw_action = np.array([dx, dy, dz], dtype=np.float32)
+                    else:
+                        raw_action = np.array([dx, dy, dz], dtype=np.float32)
+
+                    # Ensure action is within bounds
+                    raw_action = np.clip(raw_action, env.action_space.low, env.action_space.high)
+
+                    # Environment handles internal smoothing, scaling, and dynamics step
+                    next_obs, reward, terminated, truncated, info = env.step(raw_action)
+                    done = terminated or truncated
+
+                    # Save raw action (this is what AIRL / BC policy will learn to output)
+                    ep_obs.append(next_obs)
+                    ep_acts.append(raw_action)
+
+                    next_tick += CONTROL_DT
+                    sleep = next_tick - time.perf_counter()
+
+                    if sleep > 0:
+                        time.sleep(sleep)
+                    else:
+                        next_tick = time.perf_counter()
+                    
+                if aborted:
+                    print(f"Trial {current_ep_num} DISCARDED (Cancelled by operator).")
+                elif truncated:
+                    print(f"Trial {current_ep_num} DISCARDED (Reached max episode steps).")
+                elif terminated:
+                    dataset.append({
+                        "obs": np.array(ep_obs, dtype=np.float32),
+                        "acts": np.array(ep_acts, dtype=np.float32),
+                        "terminal": True
+                    })
+                    print(f"Saved Episode {current_ep_num} with {len(ep_acts)} steps!")
                 else:
-                    fx = apply_cubic_scaling(fx)
-                    fy = apply_cubic_scaling(fy)
-                    fz = apply_cubic_scaling(fz)
-                    raw_delta = np.array([fx * scale, fy * scale, fz * scale], dtype=np.float32)
-                    smoothed_action = alpha * raw_delta + (1.0 - alpha) * smoothed_action
-                    dx, dy, dz = smoothed_action[0], smoothed_action[1], smoothed_action[2]
-                action = np.array([dx, dy, dz], dtype=np.float32)
+                    print(f"Trial {current_ep_num} DISCARDED (Ended without success).")
 
-                action = np.clip(action, env.action_space.low, env.action_space.high)
-               
-                next_obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                
-                ep_obs.append(next_obs)
-                ep_acts.append(action)
-                
-                
-            if aborted:
-                print(f"Trial {current_ep_num} DISCARDED (Cancelled by operator).")
-            elif truncated:
-                print(f"Trial {current_ep_num} DISCARDED (Reached max episode steps).")
-            elif terminated:
-                dataset.append({
-                "obs": np.array(ep_obs, dtype=np.float32),
-                "acts": np.array(ep_acts, dtype=np.float32),
-                "terminal": True
-                })
-                print(f"Saved Episode {current_ep_num} with {len(ep_acts)} steps!")
-            else:
-                print(f"Trial {current_ep_num} DISCARDED (Ended without success).")
-    env.close()
+    except KeyboardInterrupt:
+        print("\nSession interrupted by user.")
     
-    with open(output_file, "wb") as f:
-        pickle.dump(dataset, f)
-
+    finally:
+        print("Closing Gymnasium environment...")
+        env.close()
+        
+        with open(output_file, "wb") as f:
+            pickle.dump(dataset, f)
+        print("Dataset saved successfully.")
 
 if __name__ == "__main__":
     run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5)

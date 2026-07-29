@@ -87,8 +87,7 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     print(f"Plot saved successfully as '{save_path}'.")
     plt.show()
 
-
-def train_on_operator_data(data_path="operator_data.pkl", total_epochs=50, eval_episodes_per_epoch=10):
+def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_freq=4, eval_episodes=5):
     env_id = "FrankaPickAndPlaceSparse-v0"
     
     # Instantiate wrapped environment matching demonstration specs
@@ -142,13 +141,13 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=50, eval_
         # Train 1 epoch at a time
         bc_trainer.train(n_epochs=1)
         
-        # Evaluate success rate over headless episodes
-        success_rate = evaluate_success_rate(bc_trainer.policy, env_id=env_id, num_episodes=eval_episodes_per_epoch)
-        
-        epochs_list.append(epoch)
-        success_rates_list.append(success_rate)
-        
-        print(f"Epoch {epoch:2d}/{total_epochs:2d} | Success Rate: {success_rate:5.1f}%")
+        if epoch % eval_freq == 0 or epoch == total_epochs:
+            success_rate = evaluate_success_rate(bc_trainer.policy, env_id=env_id, num_episodes=eval_episodes)
+            epochs_list.append(epoch)
+            success_rates_list.append(success_rate)
+            print(f"Epoch {epoch:2d}/{total_epochs:2d} | Success Rate: {success_rate:5.1f}%")
+        else:
+            print(f"Epoch {epoch:2d}/{total_epochs:2d} | Training...")
 
     # save trained policy as pytorch model
     bc_trainer.policy.save("bc_panda_spacemouse_model.pt")
@@ -162,4 +161,4 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=50, eval_
 
 
 if __name__ == "__main__":
-    train_on_operator_data()
+    train_on_operator_data(total_epochs=40, eval_freq=5, eval_episodes=5)
