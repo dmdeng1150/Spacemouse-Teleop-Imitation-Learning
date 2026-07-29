@@ -23,7 +23,8 @@ def evaluate_and_view_policy(policy, num_episodes=3):
     
     # 1. Create evaluation environment with human rendering enabled
     eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=350)
-    eval_env = FlattenGoalEnv(eval_raw)
+    eval_env_flat = FlattenGoalEnv(eval_raw)
+    eval_env = SmoothFrankaWrapper(eval_env_flat)
     
     for ep in range(num_episodes):
         obs, info = eval_env.reset()

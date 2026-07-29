@@ -3,18 +3,18 @@ import pickle
 import numpy as np
 import panda_mujoco_gym
 import time
-import matplotlib.pyplot as plt  # Added for plotting
+import matplotlib.pyplot as plt
 
 from imitation.data import types
 from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
-from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper # Import data from demos
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper
 
-def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_episodes=10):
-    """Fast, headless evaluation to compute success rate (%) over multiple episodes."""
-    # Create headless environment for fast evaluation (no render_mode)
-    eval_raw = gym.make(env_id, max_episode_steps=200)
-    eval_env = FlattenGoalEnv(eval_raw)
+
+def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_episodes=10, max_steps=350):
+    eval_raw = gym.make(env_id, max_episode_steps=max_steps)
+    eval_env_flat = FlattenGoalEnv(eval_raw)
+    eval_env = SmoothFrankaWrapper(eval_env_flat)
     
     successes = 0
     for _ in range(num_episodes):
@@ -24,10 +24,13 @@ def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_epis
         
         while not done:
             action, _ = policy.predict(obs, deterministic=True)
+            
+            # snap gripper prediction to binary
+            action[3] = 1.0 if action[3] >= 0.0 else -1.0
+            
             obs, reward, terminated, truncated, info = eval_env.step(action)
             done = terminated or truncated
             
-            # Check if environment flagged success
             if info.get("is_success", False) or terminated:
                 ep_success = True
                 
@@ -37,11 +40,12 @@ def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_epis
     eval_env.close()
     return (successes / num_episodes) * 100.0
 
-def evaluate_and_view_policy(policy, env_id="FrankaPickAndPlaceSparse-v0", num_episodes=3):
-    """Opens the 3D MuJoCo viewer and watches the trained BC agent live."""
+
+def evaluate_and_view_policy(policy, env_id="FrankaPickAndPlaceSparse-v0", num_episodes=3, max_steps=350):
     print("\n--- Launching 3D Simulation Evaluation ---")
-    eval_raw = gym.make(env_id, render_mode="human", max_episode_steps=350)
-    eval_env = FlattenGoalEnv(eval_raw)
+    eval_raw = gym.make(env_id, render_mode="human", max_episode_steps=max_steps)
+    eval_env_flat = FlattenGoalEnv(eval_raw)
+    eval_env = SmoothFrankaWrapper(eval_env_flat)
     
     for ep in range(num_episodes):
         obs, info = eval_env.reset()
@@ -51,6 +55,10 @@ def evaluate_and_view_policy(policy, env_id="FrankaPickAndPlaceSparse-v0", num_e
         
         while not done:
             action, _ = policy.predict(obs, deterministic=True)
+            
+            # snap continuous gripper prediction to binary state, since that's how we train it
+            action[3] = 1.0 if action[3] >= 0.0 else -1.0
+            
             obs, reward, terminated, truncated, info = eval_env.step(action)
             done = terminated or truncated
             step += 1
@@ -60,14 +68,8 @@ def evaluate_and_view_policy(policy, env_id="FrankaPickAndPlaceSparse-v0", num_e
         
     eval_env.close()
 
-def train_on_operator_data(data_path="operator_data.pkl"):
-    # 1. Instantiate wrapped environment matching data dimensionality
-    raw_env = gym.make("FrankaPickAndPlaceSparse-v0")
-    flat_env = FlattenGoalEnv(raw_env)
-    smooth_env = SmoothFrankaWrapper(flat_env)
-    train_env = RolloutInfoWrapper(smooth_env) # Required for tracking internal imitation steps
+
 def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
-    """Plots Success Rate (%) vs Training Epochs using Matplotlib."""
     plt.figure(figsize=(8, 5))
     plt.plot(epochs, success_rates, marker='o', linewidth=2, color='#1f77b4', label='BC Policy Success Rate')
     
@@ -85,20 +87,22 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     print(f"Plot saved successfully as '{save_path}'.")
     plt.show()
 
-def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_episodes_per_epoch=10):
+
+def train_on_operator_data(data_path="operator_data.pkl", total_epochs=50, eval_episodes_per_epoch=10):
     env_id = "FrankaPickAndPlaceSparse-v0"
     
-    # 1. Instantiate wrapped environment
-    raw_env = gym.make(env_id)
+    # Instantiate wrapped environment matching demonstration specs
+    raw_env = gym.make(env_id, max_episode_steps=350)
     flat_env = FlattenGoalEnv(raw_env)
-    train_env = RolloutInfoWrapper(flat_env)
+    smooth_env = SmoothFrankaWrapper(flat_env)
+    train_env = RolloutInfoWrapper(smooth_env)
     
-    # 2. Load and parse raw pickled trajectories
+    # Load and parse raw pickled trajectories
     with open(data_path, "rb") as f:
         raw_trajectories = pickle.load(f)
         
     formatted_dataset = []
-    MIN_STEPS_THRESHOLD = 5
+    MIN_STEPS_THRESHOLD = 10
     
     for traj in raw_trajectories:
         if len(traj["acts"]) < MIN_STEPS_THRESHOLD:
@@ -114,20 +118,25 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_
             )
         )
         
-    print(f"Loaded {len(formatted_dataset)} operator runs for training.")
+    print(f"Loaded {len(formatted_dataset)} valid operator runs for training.")
 
-    # 3. Instantiate BC Trainer
+    # Instantiate BC Trainer with L2 regularization
     bc_trainer = bc.BC(
         observation_space=train_env.observation_space,
         action_space=train_env.action_space,
         demonstrations=formatted_dataset,
+        l2_weight=1e-4,
         rng=np.random.default_rng(seed=42)
     )
     
-    # 4. Train Epoch-by-Epoch & Track Success Rate
+    # Train Epoch-by-Epoch & Track Success Rate
     print("\nStarting Behavioral Cloning with Success Rate Tracking...")
     epochs_list = []
     success_rates_list = []
+
+    # Evaluate baseline before training (Epoch 0)
+    initial_rate = evaluate_success_rate(bc_trainer.policy, env_id=env_id, num_episodes=eval_episodes_per_epoch)
+    print(f"Epoch  0/{total_epochs:2d} | Baseline Success Rate: {initial_rate:5.1f}%")
 
     for epoch in range(1, total_epochs + 1):
         # Train 1 epoch at a time
@@ -141,15 +150,16 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_
         
         print(f"Epoch {epoch:2d}/{total_epochs:2d} | Success Rate: {success_rate:5.1f}%")
 
-    # 5. Save the trained policy
+    # save trained policy as pytorch model
     bc_trainer.policy.save("bc_panda_spacemouse_model.pt")
     print("\nModel saved successfully as 'bc_panda_spacemouse_model.pt'")
 
-    # 6. Plot Success Rate vs. Epochs
+    # plot success rate vs epochs
     plot_success_rate(epochs_list, success_rates_list)
 
-    # 7. Live 3D Visual Evaluation
+    # visual evaluation of robot movement
     evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3)
+
 
 if __name__ == "__main__":
     train_on_operator_data()
