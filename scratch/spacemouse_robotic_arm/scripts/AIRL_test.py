@@ -15,7 +15,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.ppo import MlpPolicy
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from training_code import FlattenGoalEnv # Import wrapper from demos
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper # import wrapper from demos
 
 def evaluate_and_view_policy(policy, num_episodes=3):
     """Opens the MuJoCo viewer and watches the trained AIRL agent perform the task live."""
@@ -50,9 +50,10 @@ def evaluate_and_view_policy(policy, num_episodes=3):
 def train_on_operator_data(data_path="operator_data.pkl"):
     # 1. Instantiate Vectorized Environment (AIRL requires VecEnv for online rollouts)
     def make_env():
-        raw_env = gym.make("FrankaPickAndPlaceSparse-v0")
+        raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=1000)
         flat_env = FlattenGoalEnv(raw_env)
-        return RolloutInfoWrapper(flat_env)
+        smooth_env = SmoothFrankaWrapper(flat_env)
+        return RolloutInfoWrapper(smooth_env)
 
     venv = DummyVecEnv([make_env])
     

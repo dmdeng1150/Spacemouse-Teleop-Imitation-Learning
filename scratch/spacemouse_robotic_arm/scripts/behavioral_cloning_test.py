@@ -7,7 +7,7 @@ import time
 from imitation.data import types
 from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
-from training_code import FlattenGoalEnv # Import data from demos
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper # Import data from demos
 
 def evaluate_and_view_policy(policy, num_episodes=3):
     """Opens the MuJoCo viewer and watches the trained BC agent perform the task live."""
@@ -43,7 +43,8 @@ def train_on_operator_data(data_path="operator_data.pkl"):
     # 1. Instantiate wrapped environment matching data dimensionality
     raw_env = gym.make("FrankaPickAndPlaceSparse-v0")
     flat_env = FlattenGoalEnv(raw_env)
-    train_env = RolloutInfoWrapper(flat_env) # Required for tracking internal imitation steps
+    smooth_env = SmoothFrankaWrapper(flat_env)
+    train_env = RolloutInfoWrapper(smooth_env) # Required for tracking internal imitation steps
     
     # 2. Load and parse the raw pickled operator trajectories
     with open(data_path, "rb") as f:
