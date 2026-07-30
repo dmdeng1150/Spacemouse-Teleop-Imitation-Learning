@@ -15,9 +15,9 @@ from training_code_push import FlattenGoalEnv, SmoothFrankaWrapper3D
 # --- NEW IMPORT FOR BIGGER NEURAL NETWORK ---
 from stable_baselines3.common.policies import ActorCriticPolicy
 
-def evaluate_success_rate(policy, env_id="FrankaPushSparse-v0", num_episodes=5):
+def evaluate_success_rate(policy, env_id="FrankaPushSparse-v0", num_episodes=10, max_steps=350):
     """Fast, headless evaluation to compute success rate (%)."""
-    eval_raw = gym.make(env_id, max_episode_steps=150)
+    eval_raw = gym.make(env_id, max_episode_steps=250)
     flat_env = FlattenGoalEnv(eval_raw)
     eval_env = SmoothFrankaWrapper3D(flat_env)
     
@@ -82,7 +82,7 @@ def plot_success_rate(epochs, success_rates, save_path="bc_push_success_rate.png
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"📊 Plot saved successfully as '{save_path}'.")
+    print(f"Plot saved successfully as '{save_path}'.")
     plt.show()
 
 def train_on_operator_data(data_path="operator_data_push.pkl", total_epochs=500, eval_freq=100, eval_episodes=5):

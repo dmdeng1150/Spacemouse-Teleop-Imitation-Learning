@@ -10,12 +10,10 @@ from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
 from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper
 
+from stable_baselines3.common.policies import ActorCriticPolicy
 
-def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_episodes=10, max_steps=350):
-    eval_raw = gym.make(env_id, max_episode_steps=max_steps)
-    eval_env_flat = FlattenGoalEnv(eval_raw)
-    eval_env = SmoothFrankaWrapper(eval_env_flat)
-    
+def evaluate_success_rate(policy, eval_env, num_episodes=10):
+    """Uses a PRE-MADE evaluation environment to prevent MuJoCo memory leaks."""
     successes = 0
     for _ in range(num_episodes):
         obs, info = eval_env.reset()
@@ -25,7 +23,7 @@ def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_epis
         while not done:
             action, _ = policy.predict(obs, deterministic=True)
             
-            # snap gripper prediction to binary
+            # Snap gripper prediction to binary
             action[3] = 1.0 if action[3] >= 0.0 else -1.0
             
             obs, reward, terminated, truncated, info = eval_env.step(action)
@@ -37,7 +35,6 @@ def evaluate_success_rate(policy, env_id="FrankaPickAndPlaceSparse-v0", num_epis
         if ep_success:
             successes += 1
             
-    eval_env.close()
     return (successes / num_episodes) * 100.0
 
 
@@ -56,7 +53,7 @@ def evaluate_and_view_policy(policy, env_id="FrankaPickAndPlaceSparse-v0", num_e
         while not done:
             action, _ = policy.predict(obs, deterministic=True)
             
-            # snap continuous gripper prediction to binary state, since that's how we train it
+            # Snap continuous gripper prediction to binary state
             action[3] = 1.0 if action[3] >= 0.0 else -1.0
             
             obs, reward, terminated, truncated, info = eval_env.step(action)
@@ -78,23 +75,29 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     plt.ylabel('Success Rate (%)', fontsize=12)
     
     plt.ylim(-5, 105)
-    plt.xlim(1, max(epochs))
+    plt.xlim(0, max(epochs) if epochs else 500)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend(loc='lower right', fontsize=11)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"Plot saved successfully as '{save_path}'.")
-    plt.show()
+    print(f"📊 Plot saved successfully as '{save_path}'.")
+    plt.close()  # <--- CRITICAL FIX: Closes the plot in the background instead of freezing the script
 
-def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_freq=4, eval_episodes=5):
+
+def train_on_operator_data(data_path="operator_data.pkl", total_epochs=500, eval_freq=100, eval_episodes=5):
     env_id = "FrankaPickAndPlaceSparse-v0"
     
-    # Instantiate wrapped environment matching demonstration specs
+    # Instantiate Training Environment
     raw_env = gym.make(env_id, max_episode_steps=350)
     flat_env = FlattenGoalEnv(raw_env)
     smooth_env = SmoothFrankaWrapper(flat_env)
     train_env = RolloutInfoWrapper(smooth_env)
+
+    # --- CRITICAL FIX: Instantiate Headless Evaluation Environment ONCE ---
+    eval_raw = gym.make(env_id, max_episode_steps=350)
+    eval_env_flat = FlattenGoalEnv(eval_raw)
+    headless_eval_env = SmoothFrankaWrapper(eval_env_flat)
     
     # Load and parse raw pickled trajectories
     with open(data_path, "rb") as f:
@@ -118,12 +121,20 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_
         )
         
     print(f"Loaded {len(formatted_dataset)} valid operator runs for training.")
-
-    # Instantiate BC Trainer with L2 regularization
+    
+    custom_policy = ActorCriticPolicy(
+        observation_space=train_env.observation_space,
+        action_space=train_env.action_space,
+        lr_schedule=lambda _: 1e-3,  # Fast, constant learning rate
+        net_arch=[256, 256]          # 4x larger neural network capacity
+    )
+    
+    # Instantiate BC Trainer
     bc_trainer = bc.BC(
         observation_space=train_env.observation_space,
         action_space=train_env.action_space,
         demonstrations=formatted_dataset,
+        policy=custom_policy,        # <--- CRITICAL FIX: ACTUALLY USE THE BIGGER NETWORK
         l2_weight=1e-4,
         rng=np.random.default_rng(seed=42)
     )
@@ -134,31 +145,34 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=20, eval_
     success_rates_list = []
 
     # Evaluate baseline before training (Epoch 0)
-    initial_rate = evaluate_success_rate(bc_trainer.policy, env_id=env_id, num_episodes=eval_episodes_per_epoch)
-    print(f"Epoch  0/{total_epochs:2d} | Baseline Success Rate: {initial_rate:5.1f}%")
+    initial_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=10)
+    epochs_list.append(0)
+    success_rates_list.append(initial_rate)
+    print(f"Epoch   0/{total_epochs} | Baseline Success Rate: {initial_rate:5.1f}%")
 
     for epoch in range(1, total_epochs + 1):
-        # Train 1 epoch at a time
-        bc_trainer.train(n_epochs=1)
+        # Train 1 epoch at a time (progress_bar=False prevents VSCode terminal crashing)
+        bc_trainer.train(n_epochs=1, progress_bar=False)
         
         if epoch % eval_freq == 0 or epoch == total_epochs:
-            success_rate = evaluate_success_rate(bc_trainer.policy, env_id=env_id, num_episodes=eval_episodes)
+            success_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=eval_episodes)
             epochs_list.append(epoch)
             success_rates_list.append(success_rate)
-            print(f"Epoch {epoch:2d}/{total_epochs:2d} | Success Rate: {success_rate:5.1f}%")
-        else:
-            print(f"Epoch {epoch:2d}/{total_epochs:2d} | Training...")
+            print(f"Epoch {epoch:3d}/{total_epochs} | Success Rate: {success_rate:5.1f}%")
 
-    # save trained policy as pytorch model
+    # Cleanup headless evaluation environment safely
+    headless_eval_env.close()
+
+    # Save trained policy as pytorch model
     bc_trainer.policy.save("bc_panda_spacemouse_model.pt")
     print("\nModel saved successfully as 'bc_panda_spacemouse_model.pt'")
 
-    # plot success rate vs epochs
+    # Plot success rate vs epochs
     plot_success_rate(epochs_list, success_rates_list)
 
-    # visual evaluation of robot movement
+    # Visual evaluation of robot movement
     evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3)
 
 
 if __name__ == "__main__":
-    train_on_operator_data(total_epochs=40, eval_freq=5, eval_episodes=5)
+    train_on_operator_data(total_epochs=500, eval_freq=100, eval_episodes=5)
