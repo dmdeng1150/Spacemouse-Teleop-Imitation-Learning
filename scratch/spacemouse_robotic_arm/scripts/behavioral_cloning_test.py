@@ -11,8 +11,19 @@ from imitation.data.wrappers import RolloutInfoWrapper
 from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper
 
 from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.logger import KVWriter
 
-def evaluate_success_rate(policy, eval_env, num_episodes=10):
+# --- CUSTOM LOGGER TO EXTRACT METRICS ---
+class CustomLogCollector(KVWriter):
+    """Custom logger to programmatically extract SB3/imitation training metrics."""
+    def __init__(self):
+        self.logs = []
+    def write(self, key_values, key_excluded, step=0):
+        self.logs.append(key_values.copy())
+    def close(self):
+        pass
+
+def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=350):
     """Uses a PRE-MADE evaluation environment to prevent MuJoCo memory leaks."""
     successes = 0
     for _ in range(num_episodes):
@@ -81,8 +92,44 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"📊 Plot saved successfully as '{save_path}'.")
-    plt.close()  # <--- CRITICAL FIX: Closes the plot in the background instead of freezing the script
+    print(f"Plot saved successfully as '{save_path}'.")
+    plt.close() 
+
+def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_training_metrics.png"):
+    """Generates a MATLAB-style plot with a dual y-axis for Loss and Prob True Act."""
+    plt.style.use('default') # Classic clean baseline
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    
+    # MATLAB Default UI Colors
+    matlab_blue = '#0072BD'
+    matlab_orange = '#D95319'
+    
+    # Plot 1: Loss (Left Y-Axis)
+    ax1.set_xlabel('Epochs', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Loss', color=matlab_blue, fontsize=12, fontweight='bold')
+    line1 = ax1.plot(epochs, loss, '-', color=matlab_blue, linewidth=2, label='Loss')
+    ax1.tick_params(axis='y', labelcolor=matlab_blue)
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    
+    if epochs and max(epochs) > min(epochs):
+        ax1.set_xlim(min(epochs), max(epochs))
+    
+    # Plot 2: Probability of True Action (Right Y-Axis)
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Prob True Act', color=matlab_orange, fontsize=12, fontweight='bold')
+    line2 = ax2.plot(epochs, prob_true_act, '-', color=matlab_orange, linewidth=2, label='Prob True Act')
+    ax2.tick_params(axis='y', labelcolor=matlab_orange)
+    
+    # Combine Legends
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='best', framealpha=0.9)
+    
+    plt.title('Training Metrics: Loss & Prob True Action', fontsize=14, fontweight='bold')
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"MATLAB metrics plot saved successfully as '{save_path}'.")
+    plt.close()
 
 
 def train_on_operator_data(data_path="operator_data.pkl", total_epochs=500, eval_freq=100, eval_episodes=5):
@@ -145,7 +192,7 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=500, eval
     success_rates_list = []
 
     # Evaluate baseline before training (Epoch 0)
-    initial_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=10)
+    initial_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=10, max_steps=350)
     epochs_list.append(0)
     success_rates_list.append(initial_rate)
     print(f"Epoch   0/{total_epochs} | Baseline Success Rate: {initial_rate:5.1f}%")
@@ -171,7 +218,7 @@ def train_on_operator_data(data_path="operator_data.pkl", total_epochs=500, eval
     plot_success_rate(epochs_list, success_rates_list)
 
     # Visual evaluation of robot movement
-    evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3)
+    evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3, max_steps=350)
 
 
 if __name__ == "__main__":
