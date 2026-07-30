@@ -54,14 +54,15 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
     if os.path.exists(output_file):
         try:
             with open(output_file, "rb") as f:
-                dataset = pickle.load(f)
-            print(f"Loaded {len(dataset)} existing episodes.")
+                existing_dataset = pickle.load(f)
+            print(f"Loaded {len(existing_dataset)} existing episodes.")
         except Exception:
-            dataset = []
+            existing_dataset = []
     else:
-        dataset = []
+        existing_dataset = []
 
-    initial_count = len(dataset)
+    initial_count = len(existing_dataset)
+    new_dataset = []
 
     raw_env = gym.make(env_id, render_mode="human", max_episode_steps=1000)
     flat_env = FlattenGoalEnv(raw_env)
@@ -148,7 +149,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                 elif truncated:
                     print(f"Trial {current_ep_num} DISCARDED (Reached max episode steps).")
                 elif terminated:
-                    dataset.append({
+                    new_dataset.append({
                         "obs": np.array(ep_obs, dtype=np.float32),
                         "acts": np.array(ep_acts, dtype=np.float32),
                         "terminal": True
@@ -165,12 +166,12 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
         env.close()
         
         print("\n--- Applying Dataset Filters (Alignment, Smoothing, Downsampling) ---")
-        filtered_dataset = []
+        filtered_new_dataset = []
         
         REACTION_SHIFT = 15  # Shift actions back 150ms to align with human reaction time
         SKIP_FRAMES = 5      # Downsample from 100Hz to 20Hz
         
-        for traj in dataset:
+        for traj in new_dataset:
             raw_obs = traj["obs"]   
             raw_acts = traj["acts"] 
             
@@ -194,25 +195,35 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
             obs_indices = np.append(indices, indices[-1] + 1)
             downsampled_obs = aligned_obs[obs_indices]
             
-            filtered_dataset.append({
+            filtered_new_dataset.append({
                 "obs": np.array(downsampled_obs, dtype=np.float32),
                 "acts": np.array(downsampled_acts, dtype=np.float32),
                 "terminal": traj["terminal"]
             })
             
         # Filter 4: Remove Meandering (Keep top 75% fastest episodes)
-        if len(filtered_dataset) > 4:
-            filtered_dataset.sort(key=lambda x: len(x["acts"]))
-            keep_count = int(len(filtered_dataset) * 0.75)
-            removed = len(filtered_dataset) - keep_count
-            filtered_dataset = filtered_dataset[:keep_count]
-            print(f"🧹 Discarded {removed} meandering/slow episodes.")
+        if len(filtered_new_dataset) > 3:
+            filtered_new_dataset.sort(key=lambda x: len(x["acts"]))
+            keep_count = int(len(filtered_new_dataset) * 0.75)
+            removed = len(filtered_new_dataset) - keep_count
+            filtered_dataset = filtered_new_dataset[:keep_count]
+            print(f"Discarded {removed} meandering/slow episodes.")
+
+        final_dataset = existing_dataset + filtered_new_dataset
+
+        if len(new_dataset) == 0:
+            print("\nNo new episodes were completed. Saving existing data.")
+            final_dataset = existing_dataset
+
+        
+
+        
             
         # ====================================================================
 
         with open(output_file, "wb") as f:
-            pickle.dump(filtered_dataset, f)
-        print(f"✅ Filtered Dataset saved successfully with {len(filtered_dataset)} optimized episodes.")
+            pickle.dump(final_dataset, f)
+        print(f"Filtered Dataset saved successfully with {len(final_dataset)} optimized episodes.")
 
 if __name__ == "__main__":
     run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5)
