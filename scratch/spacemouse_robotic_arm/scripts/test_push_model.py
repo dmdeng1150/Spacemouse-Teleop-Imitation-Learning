@@ -28,7 +28,7 @@ def test_saved_model(model_path="bc_push_spacemouse_model.pt", env_id="FrankaPus
 
     # 2. Create evaluation environment with 3D GUI enabled
     print("\n--- Launching 3D Simulation Evaluation ---")
-    raw_env = gym.make(env_id, render_mode="human", max_episode_steps=1000)
+    raw_env = gym.make(env_id, render_mode="human", max_episode_steps=300)
     flat_env = FlattenGoalEnv(raw_env)
     env = SmoothFrankaWrapper3D(flat_env)
 
