@@ -6,9 +6,9 @@ import panda_mujoco_gym
 
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3 import PPO
-from training_code import FlattenGoalEnv, SmoothFrankaWrapper  # Import your observation wrapper
+from training_code_push import FlattenGoalEnv, SmoothFrankaWrapper3D  # Import your observation wrapper
 
-def test_saved_model(model_path="bc_panda_spacemouse_model.pt", env_id="FrankaPickAndPlaceSparse-v0", num_episodes=5):
+def test_saved_model(model_path="bc_push_spacemouse_model.pt", env_id="FrankaPushSparse-v0", num_episodes=5):
     if not os.path.exists(model_path) and not os.path.exists(model_path + ".zip"):
         print(f"❌ Error: Model file '{model_path}' not found!")
         return
@@ -30,7 +30,7 @@ def test_saved_model(model_path="bc_panda_spacemouse_model.pt", env_id="FrankaPi
     print("\n--- Launching 3D Simulation Evaluation ---")
     raw_env = gym.make(env_id, render_mode="human", max_episode_steps=1000)
     flat_env = FlattenGoalEnv(raw_env)
-    env = SmoothFrankaWrapper(flat_env)
+    env = SmoothFrankaWrapper3D(flat_env)
 
     success_count = 0
 
@@ -76,7 +76,7 @@ def test_saved_model(model_path="bc_panda_spacemouse_model.pt", env_id="FrankaPi
 
 if __name__ == "__main__":
     # To test Behavioral Cloning (BC) model:
-    test_saved_model("bc_panda_spacemouse_model.pt", env_id="FrankaPickAndPlaceSparse-v0")
+    test_saved_model("bc_push_spacemouse_model.pt", env_id="FrankaPushSparse-v0")
     
     # To test AIRL model (uncomment line below):
     # test_saved_model("airl_panda_spacemouse_model.zip", env_id="FrankaPickAndPlaceSparse-v0")

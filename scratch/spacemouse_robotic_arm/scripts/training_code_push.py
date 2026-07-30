@@ -117,10 +117,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     dz = smooth_deadzone(filtered_raw["z"], deadzone=0.12)
 
                     # --- CREATE 3D OR 4D ACTION VECTOR BASED ON ENVIRONMENT ---
-                    if act_dim == 3:
-                        raw_action = np.array([dx, dy, dz], dtype=np.float32)
-                    else:
-                        raw_action = np.array([dx, dy, dz], dtype=np.float32)
+                    raw_action = np.array([dx, dy, dz], dtype=np.float32)
 
                     # Ensure action is within bounds
                     raw_action = np.clip(raw_action, env.action_space.low, env.action_space.high)
@@ -130,8 +127,12 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     done = terminated or truncated
 
                     # Save raw action (this is what AIRL / BC policy will learn to output)
-                    ep_obs.append(next_obs)
-                    ep_acts.append(raw_action)
+                    is_idle = (dx == 0.0 and dy == 0.0 and dz == 0.0)
+                    if not is_idle:
+                        ep_obs.append(next_obs)
+                        ep_acts.append(raw_action)
+
+                    obs = next_obs
 
                     next_tick += CONTROL_DT
                     sleep = next_tick - time.perf_counter()
