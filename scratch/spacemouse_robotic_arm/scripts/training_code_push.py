@@ -7,6 +7,8 @@ import sys
 import pyspacemouse  # Core SpaceMouse driver wrapper
 import panda_mujoco_gym 
 import threading
+
+from scipy.signal import savgol_filter 
 from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper3D
 
 class SpaceMouseThread:
@@ -127,10 +129,9 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     done = terminated or truncated
 
                     # Save raw action (this is what AIRL / BC policy will learn to output)
-                    is_idle = (dx == 0.0 and dy == 0.0 and dz == 0.0)
-                    if not is_idle:
-                        ep_obs.append(next_obs)
-                        ep_acts.append(raw_action)
+                
+                    ep_obs.append(next_obs)
+                    ep_acts.append(raw_action)
 
                     obs = next_obs
 
@@ -163,9 +164,55 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
         print("Closing Gymnasium environment...")
         env.close()
         
+        print("\n--- Applying Dataset Filters (Alignment, Smoothing, Downsampling) ---")
+        filtered_dataset = []
+        
+        REACTION_SHIFT = 15  # Shift actions back 150ms to align with human reaction time
+        SKIP_FRAMES = 5      # Downsample from 100Hz to 20Hz
+        
+        for traj in dataset:
+            raw_obs = traj["obs"]   
+            raw_acts = traj["acts"] 
+            
+            if len(raw_acts) < REACTION_SHIFT + 10:
+                continue # Skip corrupted/extremely short runs
+                
+            # Filter 1: Human Reaction Time Alignment
+            aligned_acts = raw_acts[REACTION_SHIFT:]
+            aligned_obs = raw_obs[:len(aligned_acts) + 1] # Ensure obs is always exactly acts + 1
+            
+            # Filter 2: Action Smoothing (Savitzky-Golay removes human hand jitter)
+            window_len = min(11, len(aligned_acts) if len(aligned_acts) % 2 != 0 else len(aligned_acts) - 1)
+            if window_len > 3:
+                aligned_acts = savgol_filter(aligned_acts, window_length=window_len, polyorder=3, axis=0)
+                
+            # Filter 3: Downsampling (Skip frames so state changes are obvious to NN)
+            indices = np.arange(0, len(aligned_acts), SKIP_FRAMES)
+            downsampled_acts = aligned_acts[indices]
+            
+            # Get matching observations + terminal observation
+            obs_indices = np.append(indices, indices[-1] + 1)
+            downsampled_obs = aligned_obs[obs_indices]
+            
+            filtered_dataset.append({
+                "obs": np.array(downsampled_obs, dtype=np.float32),
+                "acts": np.array(downsampled_acts, dtype=np.float32),
+                "terminal": traj["terminal"]
+            })
+            
+        # Filter 4: Remove Meandering (Keep top 75% fastest episodes)
+        if len(filtered_dataset) > 4:
+            filtered_dataset.sort(key=lambda x: len(x["acts"]))
+            keep_count = int(len(filtered_dataset) * 0.75)
+            removed = len(filtered_dataset) - keep_count
+            filtered_dataset = filtered_dataset[:keep_count]
+            print(f"🧹 Discarded {removed} meandering/slow episodes.")
+            
+        # ====================================================================
+
         with open(output_file, "wb") as f:
-            pickle.dump(dataset, f)
-        print("Dataset saved successfully.")
+            pickle.dump(filtered_dataset, f)
+        print(f"✅ Filtered Dataset saved successfully with {len(filtered_dataset)} optimized episodes.")
 
 if __name__ == "__main__":
     run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5)
