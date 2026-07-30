@@ -80,6 +80,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
             ep_obs = [obs]
             ep_acts = []
             gripper_val = 1.0
+            last_gripper_val = 1.0
             
             current_ep_num = initial_count + ep + 1
             print(f"\n--- Recording Episode {current_ep_num} ---")
@@ -110,10 +111,13 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                 filtered_raw["z"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["z"] + GLITCH_FILTER_ALPHA * state.z
 
                 # Raw normalized SpaceMouse action vector
+                dx = smooth_deadzone(filtered_raw["x"], deadzone=0.12)
+                dy = smooth_deadzone(filtered_raw["y"], deadzone=0.12)
+                dz = smooth_deadzone(filtered_raw["z"], deadzone=0.12)
                 raw_action = np.array([
-                    smooth_deadzone(filtered_raw["x"], deadzone=0.12),
-                    smooth_deadzone(filtered_raw["y"], deadzone=0.12),
-                    smooth_deadzone(filtered_raw["z"], deadzone=0.12),
+                    dx,
+                    dy,
+                    dz,
                     gripper_val,
                 ], dtype=np.float32)
 
@@ -122,8 +126,13 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
                 done = terminated or truncated
 
                 # Save raw action (this is what AIRL / BC policy will learn to output)
-                ep_obs.append(next_obs)
-                ep_acts.append(raw_action)
+                is_idle = (dx == 0.0 and dy == 0.0 and dz == 0.0 and gripper_val == last_gripper_val)
+                if not is_idle: 
+                    ep_obs.append(next_obs)
+                    ep_acts.append(raw_action)
+
+                obs = next_obs
+                last_gripper_val = gripper_val
 
                 next_tick += CONTROL_DT
                 sleep = next_tick - time.perf_counter()
