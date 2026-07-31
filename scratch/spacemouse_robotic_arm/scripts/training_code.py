@@ -157,43 +157,32 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
     finally:
         print("Closing Gymnasium environment...")
         env.close()
-        print("\n--- Applying Dataset Filters (Alignment, Smoothing, Downsampling) ---")
+        print("\n--- Applying Dataset Filters (Smoothing & Cleaning) ---")
         filtered_new_dataset = []
                 
-        REACTION_SHIFT = 5  # Shift actions back 150ms to align with human reaction time
-        SKIP_FRAMES = 1   #increase to reduce hz
-                
         for traj in new_dataset:
-            raw_obs = traj["obs"]   
-            raw_acts = traj["acts"] 
+            raw_obs = traj["obs"]   # len N + 1
+            raw_acts = traj["acts"] # len N
                     
-            if len(raw_acts) < REACTION_SHIFT + 10:
+            if len(raw_acts) < 10:
                 continue # Skip corrupted/extremely short runs
                         
-            # Filter 1: Human Reaction Time Alignment
-            aligned_acts = raw_acts[REACTION_SHIFT:]
-            aligned_obs = raw_obs[:len(aligned_acts) + 1] # Ensure obs is always exactly acts + 1
+            # FIX 1: NO REACTION SHIFT - Keep 1:1 state-action causality (obs[t] -> act[t])
+            aligned_obs = raw_obs
+            aligned_acts = raw_acts
                     
-                # Filter 2: Action Smoothing (Savitzky-Golay removes human hand jitter)
+            # FIX 2: Apply Savitzky-Golay ONLY to XYZ movement (indices 0, 1, 2), NOT Gripper (index 3)!
             window_len = min(11, len(aligned_acts) if len(aligned_acts) % 2 != 0 else len(aligned_acts) - 1)
             if window_len > 3:
-                aligned_acts = savgol_filter(aligned_acts, window_length=window_len, polyorder=3, axis=0)
-                        
-            # Filter 3: Downsampling (Skip frames so state changes are obvious to NN)
-            indices = np.arange(0, len(aligned_acts), SKIP_FRAMES)
-            downsampled_acts = aligned_acts[indices]
-                    
-            # Get matching observations + terminal observation
-            obs_indices = np.append(indices, indices[-1] + 1)
-            downsampled_obs = aligned_obs[obs_indices]
+                aligned_acts[:, :3] = savgol_filter(aligned_acts[:, :3], window_length=window_len, polyorder=3, axis=0)
                     
             filtered_new_dataset.append({
-                "obs": np.array(downsampled_obs, dtype=np.float32),
-                "acts": np.array(downsampled_acts, dtype=np.float32),
+                "obs": np.array(aligned_obs, dtype=np.float32),
+                "acts": np.array(aligned_acts, dtype=np.float32),
                 "terminal": traj["terminal"]
             })
                     
-        # Filter 4: Remove Meandering (Keep top 75% fastest episodes)
+        # Filter 3: Remove Meandering (Keep top 75% fastest episodes)
         if len(filtered_new_dataset) > 3:
             filtered_new_dataset.sort(key=lambda x: len(x["acts"]))
             keep_count = int(len(filtered_new_dataset) * 0.75)
@@ -206,13 +195,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
         if len(new_dataset) == 0:
             print("\nNo new episodes were completed. Saving existing data.")
             final_dataset = existing_dataset
-        
-                
-        
-                
-                    
-                # ====================================================================
-        
+
         with open(output_file, "wb") as f:
             pickle.dump(final_dataset, f)
         print(f"Filtered Dataset saved successfully with {len(final_dataset)} optimized episodes.")
