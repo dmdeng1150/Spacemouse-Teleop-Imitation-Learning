@@ -7,6 +7,7 @@ import sys
 import pyspacemouse  # Core SpaceMouse driver wrapper
 import panda_mujoco_gym 
 import threading
+import time
 
 from scipy.signal import savgol_filter 
 from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper
@@ -29,7 +30,6 @@ class SpaceMouseThread:
                     self.latest_state = state
             except Exception:
                 pass
-            time.sleep(0.001)
 
     def get_state(self):
         return self.latest_state
@@ -38,7 +38,7 @@ class SpaceMouseThread:
         self.running = False
 
 def make_teleop_env():
-    raw_env = gym.make("FrankaPushSparse-v0", render_mode="human", max_episode_steps=1000)
+    raw_env = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=1000)
     flat_env = FlattenGoalEnv(raw_env)
     return SmoothFrankaWrapper(flat_env)
 
@@ -47,7 +47,7 @@ def smooth_deadzone(x, deadzone=0.08):
         return 0.0
     return np.sign(x) * (abs(x) - deadzone) / (1.0 - deadzone)
 
-def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_file="operator_data_push.pkl"):
+def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5, output_file="operator_data_pick_and_place.pkl"):
     CONTROL_HZ = 100
     CONTROL_DT = 1.0 / CONTROL_HZ
 
@@ -68,17 +68,12 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
     flat_env = FlattenGoalEnv(raw_env)
     env = SmoothFrankaWrapper(flat_env, dt=CONTROL_DT)
 
-    # --- DYNAMICALLY DETECT ACTION DIMENSION (3 for Push, 4 for Pick/Place) ---
-    act_dim = env.action_space.shape[0]
-    print(f"Detected Environment Action Dimension: {act_dim}D")
-
     GLITCH_FILTER_ALPHA = 0.55
 
-    # Wrapped in try/finally to ensure env.close() runs if stopped early
     try:
         with pyspacemouse.open() as device:
             sm_thread = SpaceMouseThread(device)
-            
+        
             for ep in range(total_episodes):
                 obs, info = env.reset()
                 done = False
@@ -89,7 +84,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                 ep_obs = [obs]
                 ep_acts = []
                 gripper_val = 1.0
-                
+            
                 current_ep_num = initial_count + ep + 1
                 print(f"\n--- Recording Episode {current_ep_num} ---")
 
@@ -102,27 +97,27 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                         time.sleep(0.002)
                         continue
 
-                    # Buttons: Use both buttons to abort
+                # Gripper buttons
                     left, right = state.buttons
                     if left and right:
                         print(f"Episode {current_ep_num} flagged complete by operator.")
                         aborted = True
                         break
+                    elif left:
+                        gripper_val = -1.0
+                    elif right:
+                        gripper_val = 1.0
 
-                    # Low-pass filter raw SpaceMouse values
+                    # Low-pass filter raw SpaceMouse values to cancel snapback glitch
                     filtered_raw["x"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["x"] + GLITCH_FILTER_ALPHA * state.x
                     filtered_raw["y"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["y"] + GLITCH_FILTER_ALPHA * state.y
                     filtered_raw["z"] = (1 - GLITCH_FILTER_ALPHA) * filtered_raw["z"] + GLITCH_FILTER_ALPHA * state.z
 
-                    # Calculate smoothed translations
+                    # Raw normalized SpaceMouse action vector
                     dx = smooth_deadzone(filtered_raw["x"], deadzone=0.12)
                     dy = smooth_deadzone(filtered_raw["y"], deadzone=0.12)
                     dz = smooth_deadzone(filtered_raw["z"], deadzone=0.12)
-
-                    # --- CREATE 3D OR 4D ACTION VECTOR BASED ON ENVIRONMENT ---
-                    raw_action = np.array([dx, dy, dz], dtype=np.float32)
-
-                    # Ensure action is within bounds
+                    raw_action = np.array([dx, dy, dz, gripper_val], dtype=np.float32)
                     raw_action = np.clip(raw_action, env.action_space.low, env.action_space.high)
 
                     # Environment handles internal smoothing, scaling, and dynamics step
@@ -130,7 +125,6 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     done = terminated or truncated
 
                     # Save raw action (this is what AIRL / BC policy will learn to output)
-                
                     ep_obs.append(next_obs)
                     ep_acts.append(raw_action)
 
@@ -143,7 +137,7 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                         time.sleep(sleep)
                     else:
                         next_tick = time.perf_counter()
-                    
+                
                 if aborted:
                     print(f"Trial {current_ep_num} DISCARDED (Cancelled by operator).")
                 elif truncated:
@@ -159,48 +153,46 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
                     print(f"Trial {current_ep_num} DISCARDED (Ended without success).")
 
     except KeyboardInterrupt:
-        print("\nSession interrupted by user.")
-    
+            print("\nSession interrupted by user.")
     finally:
         print("Closing Gymnasium environment...")
         env.close()
-        
         print("\n--- Applying Dataset Filters (Alignment, Smoothing, Downsampling) ---")
         filtered_new_dataset = []
-        
+                
         REACTION_SHIFT = 15  # Shift actions back 150ms to align with human reaction time
         SKIP_FRAMES = 5      # Downsample from 100Hz to 20Hz
-        
+                
         for traj in new_dataset:
             raw_obs = traj["obs"]   
             raw_acts = traj["acts"] 
-            
+                    
             if len(raw_acts) < REACTION_SHIFT + 10:
                 continue # Skip corrupted/extremely short runs
-                
+                        
             # Filter 1: Human Reaction Time Alignment
             aligned_acts = raw_acts[REACTION_SHIFT:]
             aligned_obs = raw_obs[:len(aligned_acts) + 1] # Ensure obs is always exactly acts + 1
-            
-            # Filter 2: Action Smoothing (Savitzky-Golay removes human hand jitter)
+                    
+                # Filter 2: Action Smoothing (Savitzky-Golay removes human hand jitter)
             window_len = min(11, len(aligned_acts) if len(aligned_acts) % 2 != 0 else len(aligned_acts) - 1)
             if window_len > 3:
                 aligned_acts = savgol_filter(aligned_acts, window_length=window_len, polyorder=3, axis=0)
-                
+                        
             # Filter 3: Downsampling (Skip frames so state changes are obvious to NN)
             indices = np.arange(0, len(aligned_acts), SKIP_FRAMES)
             downsampled_acts = aligned_acts[indices]
-            
+                    
             # Get matching observations + terminal observation
             obs_indices = np.append(indices, indices[-1] + 1)
             downsampled_obs = aligned_obs[obs_indices]
-            
+                    
             filtered_new_dataset.append({
                 "obs": np.array(downsampled_obs, dtype=np.float32),
                 "acts": np.array(downsampled_acts, dtype=np.float32),
                 "terminal": traj["terminal"]
             })
-            
+                    
         # Filter 4: Remove Meandering (Keep top 75% fastest episodes)
         if len(filtered_new_dataset) > 3:
             filtered_new_dataset.sort(key=lambda x: len(x["acts"]))
@@ -208,22 +200,22 @@ def run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5, output_
             removed = len(filtered_new_dataset) - keep_count
             filtered_dataset = filtered_new_dataset[:keep_count]
             print(f"Discarded {removed} meandering/slow episodes.")
-
+        
         final_dataset = existing_dataset + filtered_new_dataset
-
+        
         if len(new_dataset) == 0:
             print("\nNo new episodes were completed. Saving existing data.")
             final_dataset = existing_dataset
-
         
-
+                
         
-            
-        # ====================================================================
-
+                
+                    
+                # ====================================================================
+        
         with open(output_file, "wb") as f:
             pickle.dump(final_dataset, f)
         print(f"Filtered Dataset saved successfully with {len(final_dataset)} optimized episodes.")
-
+        
 if __name__ == "__main__":
-    run_operator_session(env_id="FrankaPushSparse-v0", total_episodes=5)
+    run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5)

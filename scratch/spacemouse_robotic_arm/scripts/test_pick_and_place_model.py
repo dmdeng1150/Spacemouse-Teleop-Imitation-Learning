@@ -6,11 +6,11 @@ import panda_mujoco_gym
 
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3 import PPO
-from training_code import FlattenGoalEnv, SmoothFrankaWrapper  # Import your observation wrapper
+from scratch.spacemouse_robotic_arm.scripts.training_code_pick_and_place import FlattenGoalEnv, SmoothFrankaWrapper  # Import your observation wrapper
 
 def test_saved_model(model_path="bc_panda_spacemouse_model.pt", env_id="FrankaPickAndPlaceSparse-v0", num_episodes=5):
     if not os.path.exists(model_path) and not os.path.exists(model_path + ".zip"):
-        print(f"❌ Error: Model file '{model_path}' not found!")
+        print(f"Error: Model file '{model_path}' not found!")
         return
 
     print(f"Loading model from '{model_path}'...")
