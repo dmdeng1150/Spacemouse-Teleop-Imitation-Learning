@@ -160,8 +160,8 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
         print("\n--- Applying Dataset Filters (Alignment, Smoothing, Downsampling) ---")
         filtered_new_dataset = []
                 
-        REACTION_SHIFT = 15  # Shift actions back 150ms to align with human reaction time
-        SKIP_FRAMES = 5      # Downsample from 100Hz to 20Hz
+        REACTION_SHIFT = 5  # Shift actions back 150ms to align with human reaction time
+        SKIP_FRAMES = 1      # Downsample from 100Hz to 20Hz
                 
         for traj in new_dataset:
             raw_obs = traj["obs"]   
@@ -198,7 +198,7 @@ def run_operator_session(env_id="FrankaPickAndPlaceSparse-v0", total_episodes=5,
             filtered_new_dataset.sort(key=lambda x: len(x["acts"]))
             keep_count = int(len(filtered_new_dataset) * 0.75)
             removed = len(filtered_new_dataset) - keep_count
-            filtered_dataset = filtered_new_dataset[:keep_count]
+            filtered_new_dataset = filtered_new_dataset[:keep_count]
             print(f"Discarded {removed} meandering/slow episodes.")
         
         final_dataset = existing_dataset + filtered_new_dataset
