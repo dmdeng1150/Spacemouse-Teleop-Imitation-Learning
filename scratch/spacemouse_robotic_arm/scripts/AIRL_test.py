@@ -3,6 +3,8 @@ import pickle
 import numpy as np
 import panda_mujoco_gym
 import time
+import os
+import matplotlib.pyplot as plt
 
 from imitation.data import types
 from imitation.algorithms import bc  
@@ -13,18 +15,79 @@ from imitation.data.wrappers import RolloutInfoWrapper
 
 from stable_baselines3 import PPO
 from stable_baselines3.ppo import MlpPolicy
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.logger import KVWriter
 
-from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper # import wrapper from demos
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper
+
+# --- ENVIRONMENT FIX WRAPPER ---
+class FixDoneWrapper(gym.Wrapper):
+    """Intercepts environment step signals and forces them to be booleans.
+       This prevents Stable Baselines 3 and Imitation from crashing on array indexing.
+    """
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, float(reward), bool(terminated), bool(truncated), info
+
+# --- CUSTOM LOGGER TO EXTRACT METRICS ---
+class CustomLogCollector(KVWriter):
+    """Custom logger to programmatically extract SB3/imitation training metrics."""
+    def __init__(self):
+        self.logs = []
+    def write(self, key_values, key_excluded, step=0):
+        self.logs.append(key_values.copy())
+    def close(self):
+        pass
+
+
+def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_pretraining_metrics.png"):
+    """Generates a MATLAB-style plot with a dual y-axis for Loss and Prob True Act."""
+    if len(epochs) == 0:
+        print("No metrics collected to plot.")
+        return
+        
+    plt.style.use('default') 
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    
+    # MATLAB Default UI Colors
+    matlab_blue = '#0072BD'
+    matlab_orange = '#D95319'
+    
+    # Plot 1: Loss (Left Y-Axis)
+    ax1.set_xlabel('Epochs', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Loss', color=matlab_blue, fontsize=12, fontweight='bold')
+    line1 = ax1.plot(epochs, loss, '-', color=matlab_blue, linewidth=2, label='Loss')
+    ax1.tick_params(axis='y', labelcolor=matlab_blue)
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    
+    if len(epochs) > 1:
+        ax1.set_xlim(min(epochs), max(epochs))
+    
+    # Plot 2: Probability of True Action (Right Y-Axis)
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Prob True Act', color=matlab_orange, fontsize=12, fontweight='bold')
+    line2 = ax2.plot(epochs, prob_true_act, '-', color=matlab_orange, linewidth=2, label='Prob True Act')
+    ax2.tick_params(axis='y', labelcolor=matlab_orange)
+    
+    # Combine Legends
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='best', framealpha=0.9)
+    
+    plt.title('BC Pre-Training: Loss & Prob True Action', fontsize=14, fontweight='bold')
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"📊 MATLAB metrics plot saved successfully as '{save_path}'.")
+    plt.close()
+
 
 def evaluate_and_view_policy(policy, num_episodes=3):
-    """Opens the MuJoCo viewer and watches the trained AIRL agent perform the task live."""
     print("\n--- Launching 3D Simulation Evaluation ---")
     
-    # 1. Create evaluation environment with human rendering enabled
     eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=350)
     eval_env_flat = FlattenGoalEnv(eval_raw)
-    eval_env = SmoothFrankaWrapper(eval_env_flat)
+    eval_env_smooth = SmoothFrankaWrapper(eval_env_flat)
+    eval_env = FixDoneWrapper(eval_env_smooth) # Apply safety wrapper
     
     for ep in range(num_episodes):
         obs, info = eval_env.reset()
@@ -34,29 +97,34 @@ def evaluate_and_view_policy(policy, num_episodes=3):
         print(f"Running Evaluation Episode {ep + 1}/{num_episodes}...")
         
         while not done:
-            # Predict action from the trained policy network
             action, _ = policy.predict(obs, deterministic=True)
-            
             obs, reward, terminated, truncated, info = eval_env.step(action)
             done = terminated or truncated
             step += 1
-            
-            # Pacing so the 3D GUI updates smoothly
-            time.sleep(0.02)
             
         print(f"Episode {ep + 1} ended after {step} steps.")
         
     eval_env.close()
 
-def train_on_operator_data(data_path="operator_data.pkl"):
-    # 1. Instantiate Vectorized Environment (AIRL requires VecEnv for online rollouts)
-    def make_env():
-        raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=1000)
-        flat_env = FlattenGoalEnv(raw_env)
-        smooth_env = SmoothFrankaWrapper(flat_env)
-        return RolloutInfoWrapper(smooth_env)
 
-    venv = DummyVecEnv([make_env])
+def train_on_operator_data(data_path="operator_data.pkl"):
+    # 1. Instantiate Parallel Vectorized Environments
+    num_cpu = 8  # <-- Set this to your PC's thread count (e.g., 4, 8, 12, or 16)
+    
+    def make_env(rank, seed=0):
+        """Utility function for multiprocessed env."""
+        def _init():
+            raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=350)
+            raw_env.action_space.seed(seed + rank)
+            flat_env = FlattenGoalEnv(raw_env)
+            smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
+            fixed_env = FixDoneWrapper(smooth_env) # <--- FIX: Forces signals to Booleans safely
+            return RolloutInfoWrapper(fixed_env)
+        return _init
+
+    # Launch Subprocesses
+    print(f"Launching {num_cpu} parallel physics simulations...")
+    venv = SubprocVecEnv([make_env(i) for i in range(num_cpu)])
     
     # 2. Load and parse the raw pickled operator trajectories
     with open(data_path, "rb") as f:
@@ -77,27 +145,53 @@ def train_on_operator_data(data_path="operator_data.pkl"):
         
     print(f"Loaded {len(formatted_dataset)} operator runs for training.")
 
-    # 3. Define the Generative RL Agent (PPO) that learns via AIRL rewards
+    # 3. Define the Generative RL Agent (PPO)
     learner = PPO(
         env=venv,
         policy=MlpPolicy,
-        batch_size=64,
-        ent_coef=0.01,
+        batch_size=128,               
+        n_steps=2048 // num_cpu,      
+        ent_coef=0.02,
         learning_rate=3e-4,
         gamma=0.99,
         clip_range=0.2,
-        n_epochs=10,
-        seed=42
+        n_epochs=5,
+        seed=42,
+        device="auto"                 
     )
+    
     bc_trainer = bc.BC(
         observation_space=venv.observation_space,
         action_space=venv.action_space,
-        policy=learner.policy,  # <-- In-place updates learner.policy directly!
+        policy=learner.policy,
         demonstrations=formatted_dataset,
         rng=np.random.default_rng(42),
     )
-    # Train BC offline for 30 epochs (takes ~5-10 seconds on CPU/GPU)
-    bc_trainer.train(n_epochs=30)
+    
+    # --- LOGGER TO EXTRACT PLOT METRICS ---
+    log_collector = CustomLogCollector()
+    sb3_logger = getattr(bc_trainer.logger, "default_logger", bc_trainer.logger)
+    sb3_logger.output_formats.append(log_collector)
+    
+    print("\nPre-training Generator via Behavioral Cloning (Offline)...")
+    bc_epochs = 100
+    bc_trainer.train(n_epochs=bc_epochs)
+    
+    # --- EXTRACT METRICS & PLOT ---
+    loss_list = []
+    prob_true_act_list = []
+    
+    for log in log_collector.logs:
+        loss = log.get("bc/loss", log.get("training/loss", log.get("loss", None)))
+        prob = log.get("bc/prob_true_act", log.get("training/prob_true_act", log.get("prob_true_act", None)))
+        
+        if loss is not None and prob is not None:
+            loss_list.append(loss)
+            prob_true_act_list.append(prob)
+            
+    tracked_epochs = list(range(1, len(loss_list) + 1))
+    plot_training_metrics(tracked_epochs, prob_true_act_list, loss_list, save_path="bc_pretraining_metrics.png")
+    
     # 4. Define the AIRL Reward Network / Discriminator Architecture
     reward_net = BasicShapedRewardNet(
         observation_space=venv.observation_space,
@@ -108,9 +202,9 @@ def train_on_operator_data(data_path="operator_data.pkl"):
     # 5. Build AIRL Trainer
     airl_trainer = AIRL(
         demonstrations=formatted_dataset,
-        demo_batch_size=128,
+        demo_batch_size=1024,
         gen_replay_buffer_capacity=2048,
-        n_disc_updates_per_round=4,
+        n_disc_updates_per_round=8,
         venv=venv,
         gen_algo=learner,
         reward_net=reward_net,
@@ -118,15 +212,20 @@ def train_on_operator_data(data_path="operator_data.pkl"):
     )
     
     # 6. Train policy network online via AIRL
-    print("Starting AIRL training on your SpaceMouse runs...")
-    airl_trainer.train(total_timesteps=25_000)
+    print("\nStarting AIRL training (Online)...")
+    airl_trainer.train(total_timesteps=100_000)
+    
+    # Safely close parallel environments
+    venv.close()
     
     # 7. Save the trained generator model
     airl_trainer.gen_algo.save("airl_panda_spacemouse_model")
-    print("Model saved successfully as 'airl_panda_spacemouse_model.zip'")
+    print("\nModel saved successfully as 'airl_panda_spacemouse_model.zip'")
 
     # 8. Evaluate policy using the learned policy network
     evaluate_and_view_policy(airl_trainer.gen_algo.policy, num_episodes=3)
 
+
 if __name__ == "__main__":
+    # REQUIRED on Windows when using SubprocVecEnv
     train_on_operator_data()
