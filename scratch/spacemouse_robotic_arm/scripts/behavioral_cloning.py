@@ -25,7 +25,7 @@ class CustomLogCollector(KVWriter):
         pass
 
 
-def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=350, task_num=1):
+def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=200, task_num=1):
     """Uses a PRE-MADE evaluation environment to prevent MuJoCo memory leaks."""
     successes = 0
     for _ in range(num_episodes):
@@ -39,7 +39,7 @@ def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=350, task
 
             # Snap continuous gripper prediction to binary state ONLY for Pick and Place (Task 2)
             if task_num == 2 and len(action) > 3:
-                action[3] = 1.0 if action[3] >= 0.0 else -1.0
+                action[3] = 1.0 if action[3] > 0.3 else -1.0
             
             obs, reward, terminated, truncated, info = eval_env.step(action)
             done = terminated or truncated
@@ -102,7 +102,7 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     plt.close() 
 
 
-def train_on_operator_data(task_num=1, total_epochs=500, eval_freq=100, eval_episodes=5):
+def train_on_operator_data(task_num=1, total_epochs=100, eval_freq=300, eval_episodes=5):
     data_path = ""
     save_path = ""
     env_id = ""
@@ -116,7 +116,7 @@ def train_on_operator_data(task_num=1, total_epochs=500, eval_freq=100, eval_epi
         env_id = "FrankaPickAndPlaceSparse-v0"
     
     # Instantiate Training Environment
-    raw_env = gym.make(env_id, max_episode_steps=350)
+    raw_env = gym.make(env_id, max_episode_steps=200)
     flat_env = FlattenGoalEnv(raw_env)
     smooth_env = SmoothFrankaWrapper(flat_env)
     train_env = RolloutInfoWrapper(smooth_env)
@@ -173,7 +173,7 @@ def train_on_operator_data(task_num=1, total_epochs=500, eval_freq=100, eval_epi
 
     # Evaluate baseline before training (Epoch 0)
     initial_rate = evaluate_success_rate(
-        bc_trainer.policy, headless_eval_env, num_episodes=10, max_steps=350, task_num=task_num
+        bc_trainer.policy, headless_eval_env, num_episodes=10, max_steps=200, task_num=task_num
     )
     epochs_list.append(0)
     success_rates_list.append(initial_rate)
@@ -184,7 +184,7 @@ def train_on_operator_data(task_num=1, total_epochs=500, eval_freq=100, eval_epi
         
         if epoch % eval_freq == 0 or epoch == total_epochs:
             success_rate = evaluate_success_rate(
-                bc_trainer.policy, headless_eval_env, num_episodes=eval_episodes, task_num=task_num
+                bc_trainer.policy, headless_eval_env, num_episodes=eval_episodes, max_steps=200, task_num=task_num
             )
             epochs_list.append(epoch)
             success_rates_list.append(success_rate)
@@ -201,9 +201,9 @@ def train_on_operator_data(task_num=1, total_epochs=500, eval_freq=100, eval_epi
     plot_success_rate(epochs_list, success_rates_list)
 
     # Visual evaluation of robot movement
-    evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3, max_steps=350, task_num=task_num)
+    evaluate_and_view_policy(bc_trainer.policy, env_id=env_id, num_episodes=3, max_steps=200, task_num=task_num)
 
 
 if __name__ == "__main__":
     task = int(input("Please enter number for task you are training for. Push (1) or Pick and Place (2): "))
-    train_on_operator_data(task_num=task, total_epochs=5, eval_freq=100, eval_episodes=5)
+    train_on_operator_data(task_num=task, total_epochs=100, eval_freq=300, eval_episodes=5)
