@@ -79,3 +79,41 @@ class SmoothFrankaWrapper(gym.ActionWrapper):
             franka_env.data.ctrl[0:7] = self.ctrl_target
 
         return self.env.step(self.action(action))
+
+# --- FIXED WRAPPER: RELATIVE OBSERVATION FEATURES ---
+class RelativeGoalWrapper(gym.ObservationWrapper):
+    """Appends relative displacement vectors (ee_to_block, block_to_goal) to observation.
+       Uses exact FlattenGoalEnv layout: achieved_goal is obs[-6:-3], desired_goal is obs[-3:].
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        old_shape = env.observation_space.shape[0]
+        new_shape = old_shape + 6
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(new_shape,), dtype=np.float32
+        )
+
+    def observation(self, obs):
+        ee_pos = obs[0:3]          # First 3 elements: End-Effector 3D Position
+        block_pos = obs[-6:-3]     # FIX: Achieved Goal (Block 3D Position)
+        goal_pos = obs[-3:]        # Last 3 elements: Desired Goal 3D Position
+
+        rel_ee_to_block = block_pos - ee_pos
+        rel_block_to_goal = goal_pos - block_pos
+
+        return np.concatenate([obs, rel_ee_to_block, rel_block_to_goal]).astype(np.float32)
+
+
+# --- WRAPPER 2: BOOLEAN SIGNAL FIX ---
+class FixDoneWrapper(gym.Wrapper):
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, float(reward), bool(terminated), bool(truncated), info
+    
+class BinaryGripperActionWrapper(gym.ActionWrapper):
+    """Snaps the gripper action index 3 so PPO exploration noise doesn't chatter the fingers."""
+    def action(self, action):
+        action = np.array(action, copy=True)
+        if len(action) > 3:
+            action[3] = 1.0 if action[3] > 0.1 else -1.0
+        return action
