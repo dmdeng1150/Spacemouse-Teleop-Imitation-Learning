@@ -80,7 +80,7 @@ def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_pretraining
 def evaluate_and_view_policy(policy, num_episodes=5):
     print("\n--- Launching 3D Simulation Evaluation ---")
     
-    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=400)
+    eval_raw = gym.make("FrankaPickAndPlaceSparse-v0", render_mode="human", max_episode_steps=250)
     eval_env_flat = FlattenGoalEnv(eval_raw)
     eval_env_smooth = SmoothFrankaWrapper(eval_env_flat)
     eval_env_rel = RelativeGoalWrapper(eval_env_smooth)
@@ -121,7 +121,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place.pkl"):
     
     def make_env(rank, seed=0):
         def _init():
-            raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=400)
+            raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=250)
             raw_env.action_space.seed(seed + rank)
             flat_env = FlattenGoalEnv(raw_env)
             smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
@@ -173,9 +173,9 @@ def train_on_operator_data(data_path="operator_data_pick_and_place.pkl"):
         batch_size=128,               
         n_steps=2048 // num_cpu,      
         ent_coef=0.02,                
-        learning_rate=1e-4,           
+        learning_rate=5e-5,           
         gamma=0.99,
-        clip_range=0.1,               
+        clip_range=0.05,               
         n_epochs=10,                  
         seed=42,
         device="cpu"                 
@@ -212,7 +212,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place.pkl"):
     reward_net = BasicShapedRewardNet(
         observation_space=venv.observation_space,
         action_space=venv.action_space,
-        normalize_input_layer=RunningNorm,
+        normalize_input_layer=None,
     )
 
     airl_trainer = AIRL(
@@ -227,7 +227,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place.pkl"):
     )
     
     print("\nStarting AIRL training (Online)...")
-    airl_trainer.train(total_timesteps=150_000)
+    airl_trainer.train(total_timesteps=100_000)
     
     venv.close()
     
