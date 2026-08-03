@@ -116,7 +116,7 @@ def evaluate_and_view_policy(policy, num_episodes=5):
     eval_env.close()
 
 
-def train_on_operator_data(data_path="operator_data_pick_and_place.pkl"):
+def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pkl"):
     num_cpu = os.cpu_count() or 8  
     
     def make_env(rank, seed=0):
