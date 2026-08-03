@@ -95,9 +95,6 @@ def run_operator_session(input_source: InputSource, task_name: str, total_episod
     cfg = TASK_CONFIG[task_name]
     env_id = cfg["env_id"]
     act_dim = cfg["act_dim"]
-
-    # TODO: remove this print
-    print(f"[INFO] Task: {task_name}  |  env: {env_id}  |  action_dim: {act_dim}")
  
     if os.path.exists(output_file):
         try:
