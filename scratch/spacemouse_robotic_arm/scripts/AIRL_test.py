@@ -32,9 +32,6 @@ def observation(self, obs):
 
     return np.concatenate([obs, rel_ee_to_block, rel_block_to_goal]).astype(np.float32)
 
-
-
-
 # --- CUSTOM LOGGER ---
 class CustomLogCollector(KVWriter):
     def __init__(self):
@@ -76,6 +73,67 @@ def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_pretraining
     plt.savefig(save_path, dpi=300)
     plt.close()
 
+def plot_success_rate_comparison(results, x_label="Training Epochs", save_path="il_success_rate_comparison.png"):
+    colors = {
+        "BC": '#1f77b4',
+        "AIRL": '#d62728',
+        "GAIL": '#2ca02c',
+    }
+
+    plt.figure(figsize=(8, 5))
+
+    max_x = 0
+    for name, (x_vals, y_vals) in results.items():
+        color = colors.get(name, None)
+        plt.plot(x_vals, y_vals, marker='o', linewidth=2, color=color, label=f'{name} Success Rate')
+        if len(x_vals) > 1:
+            max_x = max(max_x, max(x_vals))
+
+    plt.title('Imitation Learning: Success Rate vs. Environment Timesteps', fontsize=14, fontweight='bold')
+    plt.xlabel(x_label, fontsize=12)
+    plt.ylabel('Success Rate (%)', fontsize=12)
+
+    plt.ylim(-5, 105)
+    if max_x > 0:
+        plt.xlim(0, max_x)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='lower right', fontsize=11)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"Success rate plot saved successfully as '{save_path}'.")
+    plt.close()
+
+def plot_distance_to_goal_comparison(results, x_label="Environment Timesteps", save_path="il_distance_to_goal_comparison.png"):
+    # plot distance-to-goal
+    colors = {
+        "BC": '#1f77b4',
+        "AIRL": '#d62728',
+        "GAIL": '#2ca02c',
+    }
+
+    plt.figure(figsize=(8, 5))
+
+    max_x = 0
+    for name, (x_vals, dist_vals) in results.items():
+        color = colors.get(name, None)
+        plt.plot(x_vals, dist_vals, marker='o', linewidth=2, color=color, label=f'{name} Mean Final Distance')
+        if len(x_vals) > 1:
+            max_x = max(max_x, max(x_vals))
+
+    plt.title('Imitation Learning: Block-to-Goal Distance vs. Environment Timesteps', fontsize=14, fontweight='bold')
+    plt.xlabel(x_label, fontsize=12)
+    plt.ylabel('Mean Final Distance (m)', fontsize=12)
+
+    if max_x > 0:
+        plt.xlim(0, max_x)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='upper right', fontsize=11)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"Distance-to-goal plot saved successfully as '{save_path}'.")
+    plt.close()
 
 def evaluate_and_view_policy(policy, num_episodes=5):
     print("\n--- Launching 3D Simulation Evaluation ---")
@@ -115,6 +173,34 @@ def evaluate_and_view_policy(policy, num_episodes=5):
     print(f"\nFinal Visual Evaluation Success Rate: {(successes / num_episodes) * 100:.1f}%")
     eval_env.close()
 
+def make_eval_env():
+    raw_env = gym.make("FrankaPickAndPlaceSparse-v0", max_episode_steps=250)
+    flat_env = FlattenGoalEnv(raw_env)
+    smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
+    rel_env = RelativeGoalWrapper(smooth_env)
+    grip_env = BinaryGripperActionWrapper(rel_env)
+    return FixDoneWrapper(grip_env)
+
+def evaluate_success_rate(policy, env, num_episodes=10, deterministic=True):
+    # function to return success rate and mean distance-to-goal to evaluate learning of policy
+    successes = 0
+    final_distances = []
+    for _ in range(num_episodes):
+        obs, info = env.reset()
+        done = False
+        while not done:
+            action, _ = policy.predict(obs, deterministic=deterministic)
+            action = np.array(action, copy=True).flatten()
+            if len(action) > 3:
+                action[3] = 1.0 if action[3] > 0.1 else -1.0
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+        if info.get("is_success", False):
+            successes += 1
+        final_distances.append(info["dist_block_goal"])   # <-- fixed
+    success_rate = (successes / num_episodes) * 100
+    mean_final_distance = float(np.mean(final_distances))
+    return success_rate, mean_final_distance
 
 def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pkl"):
     num_cpu = os.cpu_count() or 8  
@@ -175,7 +261,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
         ent_coef=0.02,                
         learning_rate=5e-5,           
         gamma=0.99,
-        clip_range=0.05,               
+        clip_range=0.2,               
         n_epochs=10,                  
         seed=42,
         device="cpu"                 
@@ -194,7 +280,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
     sb3_logger.output_formats.append(log_collector)
     
     print("\nPre-training Generator via Behavioral Cloning (Offline)...")
-    bc_epochs = 100
+    bc_epochs = 60
     bc_trainer.train(n_epochs=bc_epochs)
     
     loss_list = []
@@ -212,7 +298,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
     reward_net = BasicShapedRewardNet(
         observation_space=venv.observation_space,
         action_space=venv.action_space,
-        normalize_input_layer=None,
+        normalize_input_layer=RunningNorm,
     )
 
     airl_trainer = AIRL(
@@ -225,17 +311,47 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
         reward_net=reward_net,
         allow_variable_horizon=True
     )
-    
+
+    eval_env = make_eval_env()
+    airl_timesteps_log = []
+    airl_success_log = []
+    airl_distance_log = []
+
+    EVAL_EVERY_N_ROUNDS = 5
+    EVAL_EPISODES = 10
+
+    def airl_eval_callback(round_num):
+        if round_num % EVAL_EVERY_N_ROUNDS == 0:
+            current_timesteps = airl_trainer.gen_algo.num_timesteps
+            sr, dist = evaluate_success_rate(
+                airl_trainer.gen_algo.policy, eval_env, num_episodes=EVAL_EPISODES
+            )
+            airl_timesteps_log.append(current_timesteps)
+            airl_success_log.append(sr)
+            airl_distance_log.append(dist)
+            print(f"[AIRL eval] round {round_num} | timesteps {current_timesteps} | success_rate {sr:.1f}% | mean_final_dist {dist:.4f}")
+
     print("\nStarting AIRL training (Online)...")
-    airl_trainer.train(total_timesteps=100_000)
-    
+    airl_trainer.train(total_timesteps=100_000, callback=airl_eval_callback)
+
+    eval_env.close()
     venv.close()
     
     airl_trainer.gen_algo.save("airl_panda_spacemouse_model")
     print("\nModel saved successfully as 'airl_panda_spacemouse_model.zip'")
 
-    evaluate_and_view_policy(airl_trainer.gen_algo.policy, num_episodes=5)
+    plot_success_rate_comparison(
+        {"AIRL": (airl_timesteps_log, airl_success_log)},
+        x_label="Environment Timesteps",
+        save_path="airl_success_rate.png",
+    )
+    plot_distance_to_goal_comparison(
+        {"AIRL": (airl_timesteps_log, airl_distance_log)},
+        x_label="Environment Timesteps",
+        save_path="airl_distance_to_goal.png",
+    )
 
+    evaluate_and_view_policy(airl_trainer.gen_algo.policy, num_episodes=5)
 
 if __name__ == "__main__":
     train_on_operator_data()
