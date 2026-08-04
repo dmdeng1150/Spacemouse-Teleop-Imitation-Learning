@@ -23,15 +23,14 @@ from smooth_env import (
 )
 
 
-# --- 1. ENVIRONMENT FACTORY FUNCTION (Put it here!) ---
+# --- 1. ENVIRONMENT FACTORY FUNCTION ---
 def make_env(env_id, max_steps=400, render_mode=None):
-    """Helper factory function that builds the full environment wrapper stack."""
     raw_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=max_steps)
     flat_env = FlattenGoalEnv(raw_env)
-    #smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
-    #xyz_env = SmoothXYZActionWrapper(smooth_env, alpha=0.3)
-    grip_env = BinaryGripperActionWrapper(flat_env)
-    rel_env = RelativeGoalWrapper(grip_env)  # NOW outside grip -> can find it
+    smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
+    xyz_env = SmoothXYZActionWrapper(smooth_env, alpha=0.3)
+    grip_env = BinaryGripperActionWrapper(xyz_env)
+    rel_env = RelativeGoalWrapper(grip_env)
     fixed_env = FixDoneWrapper(rel_env)
     return fixed_env
 
@@ -48,8 +47,8 @@ class CustomLogCollector(KVWriter):
 
 
 def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=250):
-    """Uses a PRE-MADE evaluation environment to prevent MuJoCo memory leaks."""
     successes = 0
+    final_distances = []
     for _ in range(num_episodes):
         obs, info = eval_env.reset()
         done = False
@@ -67,10 +66,12 @@ def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=250):
                 
         if ep_success:
             successes += 1
+        final_distances.append(info.get("dist_block_goal", np.nan))
             
-    return (successes / num_episodes) * 100.0
-
-
+    success_rate = (successes / num_episodes) * 100.0
+    mean_final_distance = float(np.nanmean(final_distances))
+    return success_rate, mean_final_distance
+   
 def evaluate_and_view_policy(env_id, policy, num_episodes=3, max_steps=250):
     print("\n--- Launching 3D Simulation Evaluation ---")
     # Call make_env with render_mode="human" for visual evaluation
@@ -123,7 +124,7 @@ def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_training_me
     plt.title('Behavioral Cloning: Loss & Prob True Action', fontsize=14, fontweight='bold')
     fig.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"📊 MATLAB training metrics plot saved successfully as '{save_path}'.")
+    print(f"MATLAB training metrics plot saved successfully as '{save_path}'.")
     plt.close()
 
 
@@ -143,9 +144,39 @@ def plot_success_rate(epochs, success_rates, save_path="bc_success_rate.png"):
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"📊 Success Rate plot saved successfully as '{save_path}'.")
+    print(f"Success Rate plot saved successfully as '{save_path}'.")
     plt.close() 
 
+def plot_distance_to_goal_comparison(results, x_label="Environment Timesteps", save_path="il_distance_to_goal_comparison.png"):
+    # plot distance-to-goal
+    colors = {
+        "BC": '#1f77b4',
+        "AIRL": '#d62728',
+        "GAIL": '#2ca02c',
+    }
+
+    plt.figure(figsize=(8, 5))
+
+    max_x = 0
+    for name, (x_vals, dist_vals) in results.items():
+        color = colors.get(name, None)
+        plt.plot(x_vals, dist_vals, marker='o', linewidth=2, color=color, label=f'{name} Mean Final Distance')
+        if len(x_vals) > 1:
+            max_x = max(max_x, max(x_vals))
+
+    plt.title('Imitation Learning: Block-to-Goal Distance vs. Environment Timesteps', fontsize=14, fontweight='bold')
+    plt.xlabel(x_label, fontsize=12)
+    plt.ylabel('Mean Final Distance (m)', fontsize=12)
+
+    if max_x > 0:
+        plt.xlim(0, max_x)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(loc='upper right', fontsize=11)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"Distance-to-goal plot saved successfully as '{save_path}'.")
+    plt.close()
 
 def cosine_lr_schedule(progress_remaining: float) -> float:
     """Smoothly decays learning rate from 1e-4 down to 1e-5 over total epochs.
@@ -246,13 +277,15 @@ def train_on_operator_data(task_num=1, total_epochs=60, eval_freq=10, eval_episo
     success_rates_list = []
     loss_list = []
     prob_true_act_list = []
+    bc_distances_list = []
 
     best_success_rate = -1.0
 
-    initial_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=10, max_steps=400)
+    initial_rate, initial_dist = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=10, max_steps=400)
     epochs_list.append(0)
     success_rates_list.append(initial_rate)
-    print(f"Epoch   0/{total_epochs} | Baseline Success Rate: {initial_rate:5.1f}%")
+    bc_distances_list.append(initial_dist)
+    print(f"Epoch   0/{total_epochs} | Baseline Success Rate: {initial_rate:5.1f}% | Dist: {initial_dist:.4f}")
 
     for epoch in range(1, total_epochs + 1):
         bc_trainer.train(n_epochs=1, progress_bar=False)
@@ -260,22 +293,22 @@ def train_on_operator_data(task_num=1, total_epochs=60, eval_freq=10, eval_episo
         latest_logs = log_collector.logs[-1] if log_collector.logs else {}
         epoch_loss = latest_logs.get("bc/loss", latest_logs.get("training/loss", latest_logs.get("loss", 0.0)))
         epoch_prob = latest_logs.get("bc/prob_true_act", latest_logs.get("training/prob_true_act", latest_logs.get("prob_true_act", 0.0)))
-        
+
         loss_list.append(epoch_loss)
         prob_true_act_list.append(epoch_prob)
-        
+
         if epoch % eval_freq == 0 or epoch == total_epochs:
-            success_rate = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=eval_episodes, max_steps=400)
+            success_rate, dist = evaluate_success_rate(bc_trainer.policy, headless_eval_env, num_episodes=eval_episodes, max_steps=400)
             epochs_list.append(epoch)
             success_rates_list.append(success_rate)
+            bc_distances_list.append(dist)
             
             if success_rate > best_success_rate:
                 best_success_rate = success_rate
                 bc_trainer.policy.save(save_path)
-                print(f"Epoch {epoch:3d}/{total_epochs} | Loss: {epoch_loss:.4f} | Prob Act: {epoch_prob:.4f} | Success: {success_rate:5.1f}% ⭐ NEW BEST MODEL!")
+                print(f"Epoch {epoch:3d}/{total_epochs} | Loss: {epoch_loss:.4f} | Prob Act: {epoch_prob:.4f} | Success: {success_rate:5.1f}% | Dist: {dist:.4f} NEW BEST MODEL!")
             else:
-                print(f"Epoch {epoch:3d}/{total_epochs} | Loss: {epoch_loss:.4f} | Prob Act: {epoch_prob:.4f} | Success: {success_rate:5.1f}%")
-
+                print(f"Epoch {epoch:3d}/{total_epochs} | Loss: {epoch_loss:.4f} | Prob Act: {epoch_prob:.4f} | Success: {success_rate:5.1f}% | Dist: {dist:.4f}")
     headless_eval_env.close()
 
     if best_success_rate == -1.0:
@@ -284,6 +317,11 @@ def train_on_operator_data(task_num=1, total_epochs=60, eval_freq=10, eval_episo
     # Plot both graphs
     plot_success_rate(epochs_list, success_rates_list)
     plot_training_metrics(range(1, total_epochs + 1), prob_true_act_list, loss_list)
+    plot_distance_to_goal_comparison(
+        {"BC": (epochs_list, bc_distances_list)},
+        x_label="Training Epochs",
+        save_path="bc_distance_to_goal.png",
+    )
 
     # Visual evaluation of robot movement
     evaluate_and_view_policy(env_id, bc_trainer.policy, num_episodes=3, max_steps=300)
