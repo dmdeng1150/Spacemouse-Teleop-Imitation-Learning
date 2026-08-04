@@ -23,7 +23,7 @@ from smooth_env import (
 )
 
 
-# --- 1. ENVIRONMENT FACTORY FUNCTION (Put it here!) ---
+# --- 1. ENVIRONMENT FACTORY FUNCTION ---
 def make_env(env_id, max_steps=400, render_mode=None):
     raw_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=max_steps)
     flat_env = FlattenGoalEnv(raw_env)

@@ -18,19 +18,7 @@ from stable_baselines3.ppo import MlpPolicy
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.logger import KVWriter
 
-from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper, RelativeGoalWrapper, BinaryGripperActionWrapper, FixDoneWrapper
-
-def observation(self, obs):
-        # Extract 3D positions from the raw observation
-        # In panda_mujoco_gym, ee_pos is obs[0:3], block_pos is obs[6:9], goal is obs[-3:]
-    ee_pos = obs[0:3]
-    block_pos = obs[6:9]
-    goal_pos = obs[-3:]
-
-    rel_ee_to_block = block_pos - ee_pos
-    rel_block_to_goal = goal_pos - block_pos
-
-    return np.concatenate([obs, rel_ee_to_block, rel_block_to_goal]).astype(np.float32)
+from smooth_env import FlattenGoalEnv, SmoothFrankaWrapper, RelativeGoalWrapper, BinaryGripperActionWrapper, FixDoneWrapper, SmoothXYZActionWrapper
 
 # --- CUSTOM LOGGER ---
 class CustomLogCollector(KVWriter):
@@ -40,38 +28,6 @@ class CustomLogCollector(KVWriter):
         self.logs.append(key_values.copy())
     def close(self):
         pass
-
-
-def plot_training_metrics(epochs, prob_true_act, loss, save_path="bc_pretraining_metrics.png"):
-    if len(epochs) == 0:
-        return
-    plt.style.use('default') 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    matlab_blue = '#0072BD'
-    matlab_orange = '#D95319'
-    
-    ax1.set_xlabel('Epochs', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Loss', color=matlab_blue, fontsize=12, fontweight='bold')
-    line1 = ax1.plot(epochs, loss, '-', color=matlab_blue, linewidth=2, label='Loss')
-    ax1.tick_params(axis='y', labelcolor=matlab_blue)
-    ax1.grid(True, linestyle='--', alpha=0.7)
-    
-    if len(epochs) > 1:
-        ax1.set_xlim(min(epochs), max(epochs))
-    
-    ax2 = ax1.twinx()
-    ax2.set_ylabel('Prob True Act', color=matlab_orange, fontsize=12, fontweight='bold')
-    line2 = ax2.plot(epochs, prob_true_act, '-', color=matlab_orange, linewidth=2, label='Prob True Act')
-    ax2.tick_params(axis='y', labelcolor=matlab_orange)
-    
-    lines = line1 + line2
-    labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc='best', framealpha=0.9)
-    
-    plt.title('BC Pre-Training: Loss & Prob True Action', fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
 
 def plot_success_rate_comparison(results, x_label="Training Epochs", save_path="il_success_rate_comparison.png"):
     colors = {
@@ -211,9 +167,9 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
             raw_env.action_space.seed(seed + rank)
             flat_env = FlattenGoalEnv(raw_env)
             smooth_env = SmoothFrankaWrapper(flat_env, dt=0.01)
-            rel_env = RelativeGoalWrapper(smooth_env)            # <--- Adds relative features
-            grip_env = BinaryGripperActionWrapper(rel_env)        # <--- Stops gripper chattering
-            fixed_env = FixDoneWrapper(grip_env) 
+            grip_env = BinaryGripperActionWrapper(smooth_env, close_thresh=0.2, open_thresh=0.6)
+            rel_env = RelativeGoalWrapper(grip_env)            
+            fixed_env = FixDoneWrapper(rel_env) 
             return RolloutInfoWrapper(fixed_env)
         return _init
 
@@ -227,8 +183,10 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
     # Create a temporary single env to process trajectory observations
     sample_env = gym.make("FrankaPickAndPlaceSparse-v0")
     sample_flat = FlattenGoalEnv(sample_env)
-    sample_smooth = SmoothFrankaWrapper(sample_flat)
-    rel_transformer = RelativeGoalWrapper(sample_smooth)
+    sample_franka = SmoothFrankaWrapper(sample_flat)
+    sample_xyz = SmoothXYZActionWrapper(sample_franka)
+    sample_grip = BinaryGripperActionWrapper(sample_xyz)
+    rel_transformer = RelativeGoalWrapper(sample_grip, ee_z_offset=0.058)
 
     formatted_dataset = []
     for traj in raw_trajectories:
@@ -293,7 +251,6 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
             prob_true_act_list.append(prob)
             
     tracked_epochs = list(range(1, len(loss_list) + 1))
-    plot_training_metrics(tracked_epochs, prob_true_act_list, loss_list, save_path="bc_pretraining_metrics.png")
     
     reward_net = BasicShapedRewardNet(
         observation_space=venv.observation_space,
@@ -305,7 +262,7 @@ def train_on_operator_data(data_path="operator_data_pick_and_place_spacemouse.pk
         demonstrations=formatted_dataset,
         demo_batch_size=safe_batch_size,
         gen_replay_buffer_capacity=2048,
-        n_disc_updates_per_round=2,   
+        n_disc_updates_per_round=4,   
         venv=venv,
         gen_algo=learner,
         reward_net=reward_net,
