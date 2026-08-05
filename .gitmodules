@@ -1,0 +1,3 @@
+[submodule "panda_mujoco_gym"]
+	path = panda_mujoco_gym
+	url = https://github.com/alberteks/panda_mujoco_gym.git
