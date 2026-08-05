@@ -27,7 +27,7 @@ git submodule update --init --recursive
 
 Then, install our fork of panda_mujoco_gym via
 ```
-pip install =e ./panda_mujoco_gym
+pip install -e ./panda_mujoco_gym
 ```
 Install remaining dependencies, using requirements.txt if needed (should already be listed in dependencies list above).
 
