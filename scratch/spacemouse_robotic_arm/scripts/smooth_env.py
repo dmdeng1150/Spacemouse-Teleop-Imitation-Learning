@@ -15,7 +15,7 @@ class FlattenGoalEnv(gym.ObservationWrapper):
 
 
 class SmoothFrankaWrapper(gym.ActionWrapper):
-    def __init__(self, env, sensitivity=0.15, max_accel=1.5, dt=1.0/100.0):
+    def __init__(self, env, sensitivity=0.15, max_accel=3.0, dt=1.0/100.0):  # Changed 1.5 -> 3.0
         super().__init__(env)
         self.sensitivity = sensitivity
         self.max_accel = max_accel
@@ -38,7 +38,7 @@ class SmoothFrankaWrapper(gym.ActionWrapper):
         if len(raw_action) == 4:
             gripper = raw_action[3]
             processed_action = np.array([
-                xyz_action[1],
+                xyz_action[1],  # Note: axes are swapped for Franka
                 xyz_action[0],
                 xyz_action[2],
                 gripper
@@ -54,7 +54,6 @@ class SmoothFrankaWrapper(gym.ActionWrapper):
 
     def step(self, action):
         return self.env.step(self.action(action))
-
 
 class SmoothXYZActionWrapper(gym.ActionWrapper):
     def __init__(self, env, alpha=0.65):
@@ -189,6 +188,28 @@ class RelativeGoalWrapper(gym.ObservationWrapper):
             gripper_state
         ]).astype(np.float32)
 
+class DenseRewardWrapper(gym.Wrapper):
+    """Adds small dense reward based on distance to block and goal."""
+    def __init__(self, env, alpha=0.1):
+        super().__init__(env)
+        self.alpha = alpha
+        
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Add small reward for being closer to the block
+        dist_block = info.get("dist_ee_block", 0.5)
+        dist_goal = info.get("dist_block_goal", 0.5)
+        
+        # Reward: -distance (closer = higher reward)
+        # This gives the policy a gradient to follow
+        dense_reward = -dist_goal * self.alpha
+        
+        # Bonus for gripping when close to block
+        if action[3] < 0 and dist_block < 0.1:
+            dense_reward += 0.1
+            
+        return obs, reward + dense_reward, terminated, truncated, info
 
 class FixDoneWrapper(gym.Wrapper):
     def step(self, action):
