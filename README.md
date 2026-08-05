@@ -14,7 +14,9 @@ Using pip, install:
 - stable_baselines3 2.2.1
 - gymnasium_robotics 1.2.2
 NOTE: To resolve gymnasium-robotics dependency issues, try installation of all packages with the following single-line command:
+```
 pip install "gymnasium<0.30,>=0.29.0" "gymnasium-robotics==1.2.4" "imitation==1.0.1" "stable-baselines3==2.2.1" "numpy<2.0.0"
+```
 
 Finally, you will need to install panda_mujoco_gym 0.1.0. We created a [fork](https://github.com/alberteks/panda_mujoco_gym) of the original repo*. To use it, clone our repo with submodules:
 ```
