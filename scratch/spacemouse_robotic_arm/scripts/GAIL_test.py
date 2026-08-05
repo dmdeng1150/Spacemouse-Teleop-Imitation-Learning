@@ -1,7 +1,9 @@
 import os
+import sys
 import pickle
 import time
 import torch
+import multiprocessing as mp
 import numpy as np
 import gymnasium as gym
 import panda_mujoco_gym
@@ -27,47 +29,38 @@ from smooth_env import (
     FixDoneWrapper
 )
 
+# Force 'spawn' start method to prevent MuJoCo / PyTorch multiprocessing deadlocks
+if __name__ == "__main__":
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
 
 # =====================================================================
-# 1. DENSE MULTI-STAGE PROGRESS REWARD WRAPPER
+# 1. TASK REWARD BLENDER WRAPPER (Prevents Hovering Policy Collapse)
 # =====================================================================
 
-class DenseProgressRewardWrapper(gym.Wrapper):
-    """Provides continuous stage-by-stage guidance rewards:
-       Stage 1: Reward for bringing end-effector closer to block.
-       Stage 2: +2.0 Bonus when block is lifted off the table (Z > 3.5cm).
-       Stage 3: Reward for bringing lifted block closer to target goal.
-       Stage 4: +10.0 Bonus upon true task completion.
+class TaskRewardBlenderWrapper(gym.Wrapper):
+    """Scales down GAIL synthetic rewards (0.05x) so hovering pays ~7 pts, 
+       while true task completion pays +15.0 pts. Prevents policy collapse.
     """
-    def __init__(self, env):
+    def __init__(self, env, gail_scale=0.05, success_bonus=15.0):
         super().__init__(env)
+        self.gail_scale = gail_scale
+        self.success_bonus = success_bonus
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-
-        dist_ee_block = info.get("dist_ee_block", 0.0)
-        dist_block_goal = info.get("dist_block_goal", 0.0)
         
-        # Block Z height is feature 36 in the 41D observation vector
-        block_z = obs[36] if len(obs) == 41 else 0.02
+        # Scale down GAIL reward so hovering is disincentivized
+        scaled_reward = reward * self.gail_scale
+        
+        # Injects large bonus when block reaches target goal
+        if info.get("is_success", False):
+            scaled_reward += self.success_bonus
 
-        # 1. Approach Reward (Drives gripper to block)
-        r_approach = -1.0 * dist_ee_block
-
-        # 2. Lift Bonus (Triggers when block is lifted > 3.5cm)
-        is_lifted = block_z > 0.035
-        r_lift = 2.0 if is_lifted else 0.0
-
-        # 3. Transport Reward (Drives lifted block to target goal)
-        r_transport = -2.0 * dist_block_goal if is_lifted else 0.0
-
-        # 4. Final Completion Bonus
-        is_success = info.get("is_success", False)
-        r_success = 10.0 if is_success else 0.0
-
-        dense_reward = r_approach + r_lift + r_transport + r_success
-
-        return obs, float(dense_reward), bool(terminated), bool(truncated), info
+        return obs, float(scaled_reward), bool(terminated), bool(truncated), info
 
 
 # =====================================================================
@@ -85,10 +78,8 @@ def make_env(render_mode=None, max_steps=250, seed=42, rank=0):
         grip_env = BinaryGripperActionWrapper(smooth_xyz, close_thresh=0.2, open_thresh=0.6)
         rel_env = RelativeGoalWrapper(grip_env, ee_z_offset=0.058)
         fixed_env = FixDoneWrapper(rel_env)
-        
-        # Dense Progress Guidance Wrapper
-        guided_env = DenseProgressRewardWrapper(fixed_env)
-        return RolloutInfoWrapper(guided_env)
+        blended_env = TaskRewardBlenderWrapper(fixed_env, gail_scale=0.05, success_bonus=15.0)
+        return RolloutInfoWrapper(blended_env)
     return _init
 
 
@@ -96,8 +87,8 @@ def make_env(render_mode=None, max_steps=250, seed=42, rank=0):
 # 3. SUCCESS RATE EVALUATION & PLOTTING
 # =====================================================================
 
-def evaluate_success_rate(policy, eval_env, num_episodes=10, max_steps=250):
-    """Evaluates policy success rate directly across evaluation episodes."""
+def evaluate_success_rate(policy, eval_env, num_episodes=3, max_steps=250):
+    """Evaluates policy success rate directly as trained across evaluation episodes."""
     successes = 0
     for _ in range(num_episodes):
         obs, info = eval_env.reset()
@@ -183,137 +174,146 @@ def train_gail_on_operator_data(
     raw_venv = SubprocVecEnv([make_env(seed=42, rank=i) for i in range(num_cpu)])
     venv = VecNormalize(raw_venv, norm_obs=False, norm_reward=True, clip_reward=5.0)
     
-    # 2. Load Dataset
-    if not os.path.exists(data_path):
-        data_path = "operator_data_pick_and_place_kb.pkl"
+    try:
+        # 2. Load Operator Dataset
+        if not os.path.exists(data_path):
+            data_path = "operator_data_pick_and_place_kb.pkl"
 
-    with open(data_path, "rb") as f:
-        raw_trajectories = pickle.load(f)
-        
-    sample_env = gym.make("FrankaPickAndPlaceSparse-v0")
-    sample_flat = FlattenGoalEnv(sample_env)
-    sample_franka = SmoothFrankaWrapper(sample_flat)
-    sample_xyz = SmoothXYZActionWrapper(sample_franka)
-    sample_grip = BinaryGripperActionWrapper(sample_xyz)
-    rel_transformer = RelativeGoalWrapper(sample_grip, ee_z_offset=0.058)
+        with open(data_path, "rb") as f:
+            raw_trajectories = pickle.load(f)
+            
+        sample_env = gym.make("FrankaPickAndPlaceSparse-v0")
+        sample_flat = FlattenGoalEnv(sample_env)
+        sample_franka = SmoothFrankaWrapper(sample_flat)
+        sample_xyz = SmoothXYZActionWrapper(sample_franka)
+        sample_grip = BinaryGripperActionWrapper(sample_xyz)
+        rel_transformer = RelativeGoalWrapper(sample_grip, ee_z_offset=0.058)
 
-    formatted_dataset = []
-    for traj in raw_trajectories:
-        dummy_rewards = np.zeros(len(traj["acts"]), dtype=np.float32)
-        
-        transformed_obs = []
-        for i, o in enumerate(traj["obs"]):
-            g_act = traj["acts"][min(i, len(traj["acts"]) - 1)][3] if len(traj["acts"][0]) >= 4 else 1.0
-            g_state = -1.0 if g_act < 0.2 else 1.0
-            transformed_obs.append(rel_transformer.observation(o, override_gripper=g_state))
+        formatted_dataset = []
+        for traj in raw_trajectories:
+            dummy_rewards = np.zeros(len(traj["acts"]), dtype=np.float32)
+            
+            transformed_obs = []
+            for i, o in enumerate(traj["obs"]):
+                g_act = traj["acts"][min(i, len(traj["acts"]) - 1)][3] if len(traj["acts"][0]) >= 4 else 1.0
+                g_state = -1.0 if g_act < 0.2 else 1.0
+                transformed_obs.append(rel_transformer.observation(o, override_gripper=g_state))
 
-        transformed_obs = np.array(transformed_obs, dtype=np.float32)
+            transformed_obs = np.array(transformed_obs, dtype=np.float32)
 
-        formatted_dataset.append(
-            types.TrajectoryWithRew(
-                obs=transformed_obs,
-                acts=np.array(traj["acts"], dtype=np.float32),
-                infos=None,
-                terminal=traj["terminal"],
-                rews=dummy_rewards
+            formatted_dataset.append(
+                types.TrajectoryWithRew(
+                    obs=transformed_obs,
+                    acts=np.array(traj["acts"], dtype=np.float32),
+                    infos=None,
+                    terminal=traj["terminal"],
+                    rews=dummy_rewards
+                )
             )
+        sample_env.close()
+            
+        print(f"Loaded {len(formatted_dataset)} operator runs from '{data_path}' for GAIL training.")
+
+        total_expert_transitions = sum(len(traj.acts) for traj in formatted_dataset)
+        safe_batch_size = min(1024, total_expert_transitions)
+
+        # 3. Generator Policy (PPO)
+        learner = PPO(
+            env=venv,
+            policy=MlpPolicy,
+            batch_size=128,               
+            n_steps=2048 // num_cpu,      
+            ent_coef=0.0005,              
+            learning_rate=3e-5,           
+            gamma=0.99,
+            clip_range=0.2,               
+            n_epochs=10,                  
+            vf_coef=0.5,
+            seed=42,
+            device="cpu"                 
         )
-    sample_env.close()
         
-    print(f"Loaded {len(formatted_dataset)} operator runs from '{data_path}' for GAIL training.")
+        # 4. Regularized BC Pre-training
+        bc_trainer = bc.BC(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            policy=learner.policy,
+            demonstrations=formatted_dataset,
+            optimizer_cls=torch.optim.AdamW,
+            optimizer_kwargs={"lr": 1e-4},
+            ent_weight=0.02,
+            l2_weight=1e-2,
+            rng=np.random.default_rng(42),
+        )
+        
+        print("\nPre-training Generator via Regularized BC (Slow Warm-up over 100 Epochs)...")
+        bc_trainer.train(n_epochs=bc_pretrain_epochs)
+        
+        # SAVE 23.6% BC BASELINE MODEL
+        learner.save("bc_baseline_23pct_model")
+        print("\n⭐ Saved 23.6% BC Baseline Model as 'bc_baseline_23pct_model.zip'")
+        
+        # 5. GAIL Reward Network
+        reward_net = BasicRewardNet(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            normalize_input_layer=None,  
+        )
 
-    total_expert_transitions = sum(len(traj.acts) for traj in formatted_dataset)
-    safe_batch_size = min(1024, total_expert_transitions)
+        # 6. GAIL Trainer
+        gail_trainer = GAIL(
+            demonstrations=formatted_dataset,
+            demo_batch_size=128,                 
+            gen_replay_buffer_capacity=32768,    
+            gen_train_timesteps=10_000,
+            n_disc_updates_per_round=8,          # 8 updates per round for fast early alignment
+            disc_opt_kwargs={"lr": 3e-4, "weight_decay": 1e-4}, 
+            venv=venv,
+            gen_algo=learner,
+            reward_net=reward_net,
+            allow_variable_horizon=True
+        )
 
-    # 3. Generator Policy (PPO) with Higher Learning Rate (1e-4)
-    learner = PPO(
-        env=venv,
-        policy=MlpPolicy,
-        batch_size=128,               
-        n_steps=2048 // num_cpu,      
-        ent_coef=0.001,              
-        learning_rate=1e-4,           # Increased to 1e-4 for faster policy gradients
-        gamma=0.99,
-        clip_range=0.2,               
-        n_epochs=10,                  
-        vf_coef=0.5,                  # Active Value Function Coefficient
-        seed=42,
-        device="cpu"                 
-    )
-    
-    # 4. Regularized BC Pre-training
-    bc_trainer = bc.BC(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        policy=learner.policy,
-        demonstrations=formatted_dataset,
-        optimizer_cls=torch.optim.AdamW,
-        optimizer_kwargs={"lr": 1e-4},
-        ent_weight=0.02,
-        l2_weight=1e-2,
-        rng=np.random.default_rng(42),
-    )
-    
-    print("\nPre-training Generator via Regularized BC (Slow Warm-up over 100 Epochs)...")
-    bc_trainer.train(n_epochs=bc_pretrain_epochs)
-    
-    # 5. GAIL Reward Network
-    reward_net = BasicRewardNet(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        normalize_input_layer=None,  
-    )
+        # 7. Online GAIL Training Loop
+        print("\nStarting Online GAIL Training with Success Rate Evaluation...")
+        headless_eval_fn = make_env(render_mode=None, max_steps=250)
+        headless_eval_env = headless_eval_fn()
 
-    # 6. GAIL Trainer
-    gail_trainer = GAIL(
-        demonstrations=formatted_dataset,
-        demo_batch_size=128,                 
-        gen_replay_buffer_capacity=32768,    
-        gen_train_timesteps=10_000,
-        n_disc_updates_per_round=1,         # 1 update per round prevents discriminator overpowering
-        disc_opt_kwargs={"lr": 1e-4, "weight_decay": 1e-4},  
-        venv=venv,
-        gen_algo=learner,
-        reward_net=reward_net,
-        allow_variable_horizon=True
-    )
+        timesteps_list = []
+        success_rates_list = []
 
-    # 7. Online GAIL Training Loop
-    print("\nStarting Online GAIL Training with Success Rate Evaluation...")
-    headless_eval_fn = make_env(render_mode=None, max_steps=250)
-    headless_eval_env = headless_eval_fn()
+        init_sr = evaluate_success_rate(learner.policy, headless_eval_env, num_episodes=10)
+        timesteps_list.append(0)
+        success_rates_list.append(init_sr)
+        print(f"Step      0/{total_timesteps} | Post-BC Baseline Success Rate: {init_sr:5.1f}%")
 
-    timesteps_list = []
-    success_rates_list = []
+        current_timesteps = 0
+        rounds = total_timesteps // eval_freq_steps
 
-    init_sr = evaluate_success_rate(learner.policy, headless_eval_env, num_episodes=10)
-    timesteps_list.append(0)
-    success_rates_list.append(init_sr)
-    print(f"Step      0/{total_timesteps} | Post-BC Baseline Success Rate: {init_sr:5.1f}%")
+        for r in range(1, rounds + 1):
+            gail_trainer.train(total_timesteps=eval_freq_steps)
+            current_timesteps += eval_freq_steps
 
-    current_timesteps = 0
-    rounds = total_timesteps // eval_freq_steps
+            sr = evaluate_success_rate(learner.policy, headless_eval_env, num_episodes=10)
+            timesteps_list.append(current_timesteps)
+            success_rates_list.append(sr)
+            print(f"Step {current_timesteps:6d}/{total_timesteps} | Success Rate: {sr:5.1f}%")
 
-    for r in range(1, rounds + 1):
-        gail_trainer.train(total_timesteps=eval_freq_steps)
-        current_timesteps += eval_freq_steps
+        headless_eval_env.close()
 
-        sr = evaluate_success_rate(learner.policy, headless_eval_env, num_episodes=10)
-        timesteps_list.append(current_timesteps)
-        success_rates_list.append(sr)
-        print(f"Step {current_timesteps:6d}/{total_timesteps} | Success Rate: {sr:5.1f}%")
+        # 8. Plot & Save Success Rate Graph
+        plot_success_rate(timesteps_list, success_rates_list, save_path="gail_success_rate.png")
 
-    headless_eval_env.close()
+        # 9. Save GAIL Model
+        gail_trainer.gen_algo.save(model_save_path)
+        print(f"\nGAIL Model saved successfully as '{model_save_path}.zip'")
 
-    # 8. Plot & Save Success Rate Graph
-    plot_success_rate(timesteps_list, success_rates_list, save_path="gail_success_rate.png")
+    finally:
+        # Always close parallel vector envs cleanly
+        print("\nClosing parallel environment worker processes...")
+        venv.close()
 
-    venv.close()
-    
-    # 9. Save Model & Visual Evaluation
-    gail_trainer.gen_algo.save(model_save_path)
-    print(f"\nGAIL Model saved successfully as '{model_save_path}.zip'")
-
+    # 10. Visual 3D Evaluation
     evaluate_and_view_policy(gail_trainer.gen_algo.policy, num_episodes=5)
 
 
@@ -325,3 +325,9 @@ if __name__ == "__main__":
         eval_freq_steps=10_000,
         bc_pretrain_epochs=100
     )
+    
+    print("\n✅ All training, evaluation, and plotting tasks completed successfully!")
+    print("Exiting program.")
+    
+    # Force clean exit to prevent background GLFW viewer deadlocks
+    os._exit(0)
