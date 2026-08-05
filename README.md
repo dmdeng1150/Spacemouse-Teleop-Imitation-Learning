@@ -14,6 +14,23 @@ Using pip, install:
 - stable_baselines3 2.2.1
 - gymnasium_robotics 1.2.2
 NOTE: To resolve gymnasium-robotics dependency issues, try installation of all packages with the following single-line command:
+```
 pip install "gymnasium<0.30,>=0.29.0" "gymnasium-robotics==1.2.4" "imitation==1.0.1" "stable-baselines3==2.2.1" "numpy<2.0.0"
+```
 
-Finally, install panda_mujoco_gym 0.1.0. To do so, clone repo https://github.com/zichunxx/panda_mujoco_gym in parent directory. Then copy setup.py and pyproject.toml files (proivded in this repo) to root panda_mujoco_gym directory. Run pip install -e . in this directory to complete panda_mujoco_gym installation)
+Finally, you will need to install panda_mujoco_gym 0.1.0. We created a [fork](https://github.com/alberteks/panda_mujoco_gym) of the original repo*. To use it, clone our repo with submodules:
+```
+git clone --recursive https://github.com/dmdeng1150/Spacemouse-Teleop-Imitation-Learning.git
+```
+If you already cloned without --recursive, use
+```
+git submodule update --init --recursive
+```
+
+Then, install our fork of panda_mujoco_gym via
+```
+pip install -e ./panda_mujoco_gym
+```
+Install remaining dependencies, using requirements.txt if needed (should already be listed in dependencies list above).
+
+*Note: We forked the original repo since it recalculated the mocap target from the current position every step, causing the Franka arm to return back to neutral when the SpaceMouse input was released/SpaceMouse action was [0,0,0]. Now, the current position is instead immediately held on release.
